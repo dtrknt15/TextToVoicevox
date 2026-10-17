@@ -275,4 +275,6 @@ GUIを使わず、一括で変換できます。`起動.pyw` / `起動.command` 
 
 ひとりで作っている生まれたての道具です。動かない・読み間違える・ここが分かりにくい、などあれば [Issues](https://github.com/rakuyou211-blip/TextToVoicevox/issues) で教えてください。全部は直せないかもしれませんが、ちゃんと読みます。
 
+不具合じゃなくても、**使ってみた一言**がいちばん嬉しいです。「通学中に参考書を聞いてる」「ここで手が止まった」くらいで十分です。アプリの「▶ テキスト抽出 実行」の行の右端にある「💬 感想を送る」か、[感想フォーム](https://github.com/rakuyou211-blip/TextToVoicevox/issues/new?template=feedback.yml)からどうぞ。GitHub のアカウントが無ければ、X の [@rakuyou211](https://x.com/rakuyou211) へのリプライや DM でも。
+
 作者: rakuyou211（[https://github.com/rakuyou211-blip/TextToVoicevox](https://github.com/rakuyou211-blip/TextToVoicevox)） 🍂

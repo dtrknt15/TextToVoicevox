@@ -182,3 +182,5 @@ This app is released under the **MIT license**. It comes with no warranty. OCR i
 
 Made by rakuyou211, one leaf at a time. 🍂
 If something breaks or feels off, please open an issue — since it's just me, honest feedback is how it gets better.
+
+And it doesn't have to be a bug. A one-line "here's what I used it for" means a lot — use **💬 感想を送る (Send feedback)** at the right end of the "▶ テキスト抽出 実行" row in the app, the [feedback form](https://github.com/rakuyou211-blip/TextToVoicevox/issues/new?template=feedback.yml), or a reply/DM to [@rakuyou211](https://x.com/rakuyou211) on X if you don't have a GitHub account.

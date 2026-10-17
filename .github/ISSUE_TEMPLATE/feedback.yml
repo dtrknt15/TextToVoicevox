@@ -1,0 +1,29 @@
+name: 💬 感想を送る
+description: 使ってみた一言を、気軽にどうぞ。不具合でなくても大歓迎です
+title: "[感想] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        使ってくれて、ありがとうございます。ひとりで作っているので、一言でもすごく励みになります。
+        「ここが使いにくかった」も立派な感想です。GitHub のアカウントが無い方は、X の [@rakuyou211](https://x.com/rakuyou211) へのリプライや DM でも受け付けています。
+  - type: textarea
+    id: comment
+    attributes:
+      label: ひとこと
+      placeholder: 例）参考書を読ませて通学中に聞いています／インストールで○○につまずきました
+    validations:
+      required: true
+  - type: input
+    id: usage
+    attributes:
+      label: 何に使いましたか？（任意）
+      placeholder: 例）動画のナレーション、勉強、小説を聞く など
+  - type: dropdown
+    id: os
+    attributes:
+      label: パソコン（任意）
+      options:
+        - Windows
+        - Mac
+        - その他
