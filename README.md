@@ -7,7 +7,10 @@
 
 🌐 **[English README](README.en.md)** ｜ 日本語（このページ）
 
-📝 制作の背景・仕組みを記事に書きました → [本を、耳で読めるようにしたかった（Zenn）](https://zenn.dev/izumimakoto/articles/d5e86968b7bdc3)
+📝 記事にも書きました
+- 制作の背景・仕組み → [本を、耳で読めるようにしたかった（Zenn）](https://zenn.dev/izumimakoto/articles/d5e86968b7bdc3)
+- 「画面から読む」の仕組み → [Python＋macOSのVisionで「画面の囲んだ所」をオフラインOCRして、VOICEVOXで読み上げる（Qiita）](https://qiita.com/rakuyou211/items/1648fa61d0cef975e260)
+- 勉強に使う話 → [参考書を、耳で読む日があってもいい（note）](https://note.com/rakuyou211/n/n8a69d230726e)
 
 **本や書類を「ずんだもん」たちに読み上げてもらう、無料のデスクトップアプリです。**
 
@@ -20,7 +23,7 @@ PDF・画像・txt・docx・epub から文字を取り出して、あなたの�
 
 <sub>▲ 実際の画面です。ファイルを放り込んで文字を取り出し、話者を選んで試聴・音声化・字幕出力まで。行頭の「@話者名:」で行ごとに声を分けられます。テーマは4種（🍂ライト／🌙ダーク／☀️くっきり／🌿ずんだ）から選択可。右のキャラ立ち絵は任意で、画像は同梱していません（置くと まばたき・口パクもします。入れ方は下の「クレジット・利用について」を参照）。</sub>
 
-▶ **動いているところを見る**：[紹介動画（YouTube・36秒）](https://youtu.be/AWVs6Evw4E0)
+▶ **動いているところを見る**：[紹介動画（YouTube・36秒）](https://youtu.be/AWVs6Evw4E0)　／　[📷 画面から読む（ショート・24秒）](https://youtube.com/shorts/1cteSkwa-Ec)
 
 <sub>この動画のナレーション自体も、このアプリで作りました。</sub>
 
