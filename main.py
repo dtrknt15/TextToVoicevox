@@ -47,6 +47,9 @@ from tkinter import font as tkfont
 
 import core
 
+FEEDBACK_URL = ("https://github.com/rakuyou211-blip/TextToVoicevox/issues/new"
+                "?template=feedback.yml")
+
 try:
     import mp4chapters   # M4Bオーディオブックのチャプター埋め込み（純Python・同梱）
 except Exception:
@@ -650,6 +653,12 @@ class App(_Base):
         self.progress.pack(side="left", padx=10)
         # テーマ選択（🍂ライト/🌙ダーク/☀️くっきり/🌿ずんだ）。
         # packは後詰めから縮むため、固定のテーマ選択を先に確保し、伸縮する状態文を最後に
+        # 使った人が一言残せる入口（右端・常に見える所）。ダウンロードは数えられても、
+        # 声は届く場所が無いと届かない。立ち絵パネルは画像を置いた人にしか出ないので不可
+        fb = ttk.Label(run, text="💬 感想を送る", style="Link.TLabel", cursor="hand2")
+        fb.pack(side="right", padx=(GAPX, 0))
+        fb.bind("<Button-1>", lambda e: self._open_feedback())
+        _Tooltip(fb, "使ってみた一言を送れます（ブラウザで感想フォームが開きます）。")
         self.theme_cb = ttk.Combobox(run, width=12, state="readonly",
                                      values=[l for _k, l, _p in self.THEMES])
         self.theme_cb.pack(side="right", padx=4)
@@ -1430,6 +1439,13 @@ class App(_Base):
         self._blink_after = None
         self._update_portrait()
         self._blink_after = self.after(3800, self._blink_tick)
+
+    def _open_feedback(self):
+        import webbrowser
+        try:
+            webbrowser.open(FEEDBACK_URL)
+        except Exception:
+            self.status_var.set("ブラウザを開けませんでした：" + FEEDBACK_URL)
 
     def _portrait_key_for(self, label):
         """話者ラベル→立ち絵キー。そのキャラの立ち絵が置かれていればキー、無ければ None。
@@ -4738,6 +4754,8 @@ class App(_Base):
                         foreground=p["ok"], font=self._heading_font)
         style.configure("Credit.TLabel", background=p["bg"],
                         foreground=p["subtle"], font=self._credit_font)
+        style.configure("Link.TLabel", background=p["bg"],
+                        foreground=p["accent"], font=self._credit_font)
         # 通常ボタン（フラット・少し余白）
         # padding類はDPI倍率で補正（宣言だけだと高DPIでボタンだけ窮屈になる）
         btn_pad = tuple(_px(v) for v in p.get("btn_pad", (7, 3)))
