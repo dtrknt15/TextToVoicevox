@@ -1,6 +1,6 @@
 # TextToVoicevox 🍂
 
-🌐 English (this page) ｜ **[日本語 README](README.md)**
+🌐 English (this page) ｜ **[日本語 README](README.md)** ｜ **[繁體中文](README.zh-TW.md)**
 
 *Part of Rakuyoi's Toolbox — small offline tools made by one person.*
 

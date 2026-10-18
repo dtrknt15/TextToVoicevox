@@ -5,7 +5,7 @@
 ![対応OS](https://img.shields.io/badge/対応OS-Windows%20%7C%20macOS-4c9a5d)
 [![ライセンス](https://img.shields.io/github/license/rakuyou211-blip/TextToVoicevox?label=%E3%83%A9%E3%82%A4%E3%82%BB%E3%83%B3%E3%82%B9&color=4c9a5d)](LICENSE)
 
-🌐 **[English README](README.en.md)** ｜ 日本語（このページ）
+🌐 **[English README](README.en.md)** ｜ **[繁體中文](README.zh-TW.md)** ｜ 日本語（このページ）
 
 📝 記事にも書きました
 - 制作の背景・仕組み → [本を、耳で読めるようにしたかった（Zenn）](https://zenn.dev/izumimakoto/articles/d5e86968b7bdc3)
