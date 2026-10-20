@@ -5,6 +5,15 @@ cd "$(dirname "$0")" || exit 1
 xattr -d com.apple.quarantine ./*.command ./*.sh 2>/dev/null
 chmod +x ./*.command ./*.sh 2>/dev/null
 
+# venv_mac の Python で、画面表示の部品（tkinter / Tk 8.6 以上）が本当に動くか。
+# setup.command の py_ok と同じ確かめ方。ここを通らないまま main.py を起動すると、
+# 窓が出ないまま何も言わずに終わってしまう（Homebrew の tkinter 無し Python で作った等）
+venv_ok() {
+    [ -x venv_mac/bin/python ] || return 1
+    venv_mac/bin/python -c 'import sys, tkinter; tkinter.Tcl().eval("info patchlevel"); sys.exit(0 if sys.version_info >= (3, 9) and tkinter.TkVersion >= 8.6 else 1)' \
+        >/dev/null 2>&1
+}
+
 if [ ! -x venv_mac/bin/python ]; then
     echo "初回セットアップがまだのようなので、先に setup.command を実行します。"
     echo "（初回だけネット接続が必要です。数分かかることがあります）"
@@ -16,12 +25,20 @@ elif ! venv_mac/bin/python -c "" 2>/dev/null; then
     echo "venv_mac が今の環境では動かないため、setup.command で作り直します。"
     echo
     bash ./setup.command
+elif ! venv_ok; then
+    echo "venv_mac の Python では、画面表示の部品（tkinter / Tk 8.6 以上）が使えません。"
+    echo "このままでは窓が出ないので、setup.command で作り直します。"
+    echo
+    bash ./setup.command
 fi
 
-if ! venv_mac/bin/python -c "" 2>/dev/null; then
+if ! venv_ok; then
     echo
     echo "[!] セットアップが完了していないため、起動できませんでした。"
     echo "    上に出ているメッセージを確認してください。"
+    echo "    画面表示の部品（tkinter）が無いときは、python.org の Python"
+    echo "    （https://www.python.org/downloads/ ）か、Homebrew なら brew install python-tk"
+    echo "    を入れてから、setup.command をもう一度開いてください。"
     read -n 1 -s -r -p "何かキーを押すと閉じます..."
     exit 1
 fi

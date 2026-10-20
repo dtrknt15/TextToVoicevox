@@ -11,29 +11,61 @@ echo "ダウンロード時の検疫フラグと実行権限を整えていま�
 xattr -dr com.apple.quarantine . 2>/dev/null
 chmod +x ./*.command ./*.sh 2>/dev/null
 
-# Tk 8.6+ を含む Python を優先して使う（AppleのCLT付属PythonはTk 8.5で画面が描画されない）
+# 画面表示の部品（tkinter）が本当に動く Python だけを使う。
+#   - Homebrew の python3 は tkinter が別売り（python-tk）で、入っていないとアプリが
+#     何も言わずに起動しない（2026-10-03 の配布後チェックで指摘）
+#   - Apple の開発ツール付属の Python は Tk 8.5 で、画面が真っ白になる
+# なので「ある」だけでは選ばず、Tcl を実際に動かし、Tk 8.6 以上・Python 3.9 以上かを確かめる。
+# 起動.command も同じ確かめ方をする（ずれると、作った venv を起動側が弾いてしまう）。
+py_ok() {
+    [ -x "$1" ] || return 1
+    "$1" -c 'import sys, tkinter; tkinter.Tcl().eval("info patchlevel"); sys.exit(0 if sys.version_info >= (3, 9) and tkinter.TkVersion >= 8.6 else 1)' \
+        >/dev/null 2>&1
+}
+
 PY=""
-for cand in "$HOME/.local/python3.12/bin/python3" \
-            /usr/local/bin/python3 /opt/homebrew/bin/python3 \
-            /Library/Frameworks/Python.framework/Versions/*/bin/python3; do
-    if [ -x "$cand" ]; then PY="$cand"; break; fi
+if [ -n "${T2V_PY_CANDIDATES:-}" ]; then
+    # テスト用: 候補を「:」区切りで差し替える（PATH 上の python3 も見ない）
+    IFS=: read -r -a cands <<< "$T2V_PY_CANDIDATES"
+else
+    cands=("$HOME/.local/python3.12/bin/python3"
+           /usr/local/bin/python3 /opt/homebrew/bin/python3
+           /Library/Frameworks/Python.framework/Versions/*/bin/python3)
+    # PATH 上の python3 も最後に試す。/usr/bin/python3 は開発ツールが無いと
+    # 「インストールしますか」の窓を出すだけなので、開発ツールがあるときだけ
+    c="$(command -v python3 2>/dev/null)"
+    if [ -n "$c" ] && { [ "$c" != /usr/bin/python3 ] || xcode-select -p >/dev/null 2>&1; }; then
+        cands+=("$c")
+    fi
+fi
+for cand in "${cands[@]}"; do
+    # venv_mac の中の Python は、これから作り直す当の物なので使わない
+    case "$cand" in "$PWD"/venv_mac/*) continue ;; esac
+    if [ -x "$cand" ]; then
+        if py_ok "$cand"; then PY="$cand"; break; fi
+        echo "  （${cand} は画面表示の部品 tkinter / Tk 8.6 以上が使えないので見送ります）"
+    fi
 done
 if [ -z "$PY" ]; then
-    if command -v python3 >/dev/null 2>&1; then
-        PY="$(command -v python3)"
-        echo "[注意] Tk 8.6+ 対応の Python が見つからず $PY を使います。"
-        echo "       画面が真っ白になる場合は https://www.python.org/downloads/ の Python を入れてください。"
-    else
-        echo "[エラー] python3 が見つかりません。"
-        echo "https://www.python.org/downloads/ から Python をインストールしてください。"
-        read -n 1 -s -r -p "何かキーを押すと閉じます..."
-        exit 1
-    fi
+    echo
+    echo "[エラー] このアプリの画面を出せる Python が見つかりませんでした。"
+    echo "  画面表示に tkinter（Tk 8.6 以上）を使います。次のどちらかを入れてから、"
+    echo "  もう一度 setup.command を開いてください。"
+    echo
+    echo "  1. python.org の Python（おすすめ・tkinter が最初から入っています）"
+    echo "     https://www.python.org/downloads/ の「macOS 64-bit universal2 installer」"
+    echo "  2. Homebrew を使っている場合は、tkinter の部品を足す:"
+    echo "     brew install python-tk"
+    echo
+    read -n 1 -s -r -p "何かキーを押すと閉じます..."
+    exit 1
 fi
 
 echo "使用する Python: $PY"
 echo "仮想環境を作成しています..."
-"$PY" -m venv venv_mac || {
+# --clear: 前に作った venv_mac が残っていても（tkinter の無い Python で作った・
+# 別の Mac から持ってきた等）、中を空にして今の Python で作り直す
+"$PY" -m venv --clear venv_mac || {
     echo "[エラー] venv の作成に失敗しました。"
     read -n 1 -s -r -p "何かキーを押すと閉じます..."
     exit 1
@@ -50,3 +82,4 @@ echo "依存ライブラリをインストールしています（requirements.t
 echo
 echo "セットアップ完了。「起動.command」で起動できます。"
 read -n 1 -s -r -p "何かキーを押すと閉じます..."
+exit 0

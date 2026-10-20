@@ -65,11 +65,13 @@ t2v_install() {
         read -r a 2>/dev/null </dev/tty || a='n'
         case "$a" in ''|y|Y|yes|YES|はい|ｙ) return 0 ;; *) return 1 ;; esac
     }
-    # Python 3.9 以降で、画面表示の部品（Tk 8.6 以降）が入っているか。
-    # Apple の開発ツール付属の Python は Tk 8.5 で、画面が真っ白になるので弾く
+    # Python 3.9 以降で、画面表示の部品（Tk 8.6 以降）が入っていて、Tcl が実際に動くか。
+    # Apple の開発ツール付属の Python は Tk 8.5 で、画面が真っ白になるので弾く。
+    # Homebrew の python3 は tkinter が別売り（python-tk）で、無いと import の時点で落ちる。
+    # zip 版の setup.command・起動.command も同じ確かめ方をする
     py_ok() {
         [ -x "$1" ] || return 1
-        "$1" -c 'import sys, tkinter; sys.exit(0 if sys.version_info >= (3, 9) and tkinter.TkVersion >= 8.6 else 1)' \
+        "$1" -c 'import sys, tkinter; tkinter.Tcl().eval("info patchlevel"); sys.exit(0 if sys.version_info >= (3, 9) and tkinter.TkVersion >= 8.6 else 1)' \
             >/dev/null 2>&1
     }
     find_python() {
@@ -149,6 +151,7 @@ if mac:
             say ''
             say '  [!] Python を入れてから、もう一度この1行を貼り付けてください。'
             say '      https://www.python.org/downloads/ （3.9以降・macOS 64-bit universal2 installer）'
+            say '      Homebrew の Python を使うなら、画面表示の部品も: brew install python-tk'
             [ -z "${T2V_NO_LAUNCH:-}" ] && open 'https://www.python.org/downloads/' 2>/dev/null
             return 1
         fi

@@ -48,7 +48,7 @@ You give it a file. It pulls the text out, cleans it up, and reads it aloud in a
 - **On-screen label removal** — for news image OCR it also removes short Japanese labels that plain text can't tell from the article (station logo, program name, timestamp, category — e.g. "MBSニュース", "国内"), using each line's position and font size to judge that it isn't body text. macOS only, sharing the same on/off as noise removal above; conservative (it never drops article body).
 - **Command line** — there's a CLI too, if you'd rather script it than click.
 
-The current release is **v1.24.1**, which adds a **💬 感想を送る (Send feedback)** link to the app. Since v1.24.0, on Windows the zip no longer contains a single `.bat` file: setup and launching are done entirely in Python, starting from **`起動.pyw`** — so Windows 11's Smart App Control, which blocks downloaded `.bat` files on sight, has nothing left to block, and there is only one thing to double-click. v1.22.0 added **📷 画面から読む (read from screen)**: press the button (or Ctrl+R / ⌘R), the app steps aside and dims a snapshot of your screen, you drag a box around the text you want — an e-book page, a PDF viewer, a web page — and it reads that text aloud right away. The character art still isn't bundled with the app; you drop your own PNGs into `assets/立ち絵/` (see [`assets/立ち絵/README.md`](assets/立ち絵/README.md)), and everything works the same if you don't. The full history is in [CHANGELOG.md](CHANGELOG.md).
+The current release is **v1.24.2**, which fixes the Mac setup (`setup.command`) so it only picks a Python whose tkinter actually works, instead of silently failing to start with Homebrew's tkinter-less Python. v1.24.1 added a **💬 感想を送る (Send feedback)** link to the app. Since v1.24.0, on Windows the zip no longer contains a single `.bat` file: setup and launching are done entirely in Python, starting from **`起動.pyw`** — so Windows 11's Smart App Control, which blocks downloaded `.bat` files on sight, has nothing left to block, and there is only one thing to double-click. v1.22.0 added **📷 画面から読む (read from screen)**: press the button (or Ctrl+R / ⌘R), the app steps aside and dims a snapshot of your screen, you drag a box around the text you want — an e-book page, a PDF viewer, a web page — and it reads that text aloud right away. The character art still isn't bundled with the app; you drop your own PNGs into `assets/立ち絵/` (see [`assets/立ち絵/README.md`](assets/立ち絵/README.md)), and everything works the same if you don't. The full history is in [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -74,7 +74,7 @@ VOICEVOX is a separate, free program that actually makes the voices. It is **not
 Once it's installed you don't have to start it by hand every time. In the **4. 🔊 VOICEVOX へ** section the app has a **VOICEVOX起動** button, which opens VOICEVOX as usual (editor window and all, for when you want to touch things up there afterwards), and an **エンジンのみ** button, which starts only the speech engine — lighter and quicker, and it closes together with the app. Either way the app connects on its own once the engine is ready.
 
 **② Install Python**
-This app is a Python program. If you don't have Python yet, install it first (**Python 3.9 or newer** from the official python.org installer is recommended). On Windows, tick "Add Python to PATH" during install. The python.org installers for Windows and macOS already include tkinter, which the app's screen uses.
+This app is a Python program. If you don't have Python yet, install it first (**Python 3.9 or newer** from the official python.org installer is recommended). On Windows, tick "Add Python to PATH" during install. The python.org installers for Windows and macOS already include tkinter, which the app's screen uses. On a Mac with Homebrew's Python, also run `brew install python-tk`; if the Mac setup can only find a Python without tkinter, it stops and tells you so.
 
 **③ Install this app**
 Download the release zip (below) and unzip it somewhere (right-click → *Extract All* on Windows, double-click on macOS — the OS built-in extractor is recommended; some third-party tools mangle Japanese filenames or drop execute permissions). Then:
@@ -89,7 +89,7 @@ If it won't start, run **`デバッグ起動.pyw`** (macOS: `デバッグ起動.
 
 > Heads up: right now this is distributed as a **script zip**, not a ready-made `.exe` or `.app`. There is no packaged executable yet. That's on my list, but it isn't here today, and I'd rather say so than pretend otherwise.
 
-**Download (latest, v1.24.1):** [Windows](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Windows.zip) (`TextToVoicevox_Windows.zip`) · [macOS](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Mac.zip) (`TextToVoicevox_Mac.zip`). Older versions are on the [Releases page](https://github.com/rakuyou211-blip/TextToVoicevox/releases).
+**Download (latest, v1.24.2):** [Windows](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Windows.zip) (`TextToVoicevox_Windows.zip`) · [macOS](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Mac.zip) (`TextToVoicevox_Mac.zip`). Older versions are on the [Releases page](https://github.com/rakuyou211-blip/TextToVoicevox/releases).
 
 ---
 
