@@ -8,6 +8,8 @@
 
 > ⚠️ **先說清楚：軟體的畫面（按鈕和選單）目前只有日文。** 讀出來的內容也是日文。比較適合已經看得懂一些日文的人，例如正在學日文、想聽自然日文發音的人。
 
+▶ **3 分鐘看懂怎麼用**：[TextToVoicevox 使用教學（YouTube・3 分鐘・日文）](https://youtu.be/ZJlJh9jPQIY)
+
 ▶ **實際操作影片**：[介紹影片（YouTube・36 秒・日文）](https://youtu.be/AWVs6Evw4E0)　／　[ずんだもん唸太宰治《人間失格》（Shorts）](https://youtube.com/shorts/ETyigWasQPU)
 
 ---
