@@ -357,6 +357,7 @@ class App(_Base):
         self._vdetail_open = False      # プリセット/セリフ行の開閉状態（§4の折りたたみ）
         self._resize_after = None       # <Configure>デバウンス用のafterハンドル
         self._reflow_after = None       # 行の並び直し（_reflow）の予約
+        self._destroying = False        # 窓を壊している最中か（予約した処理を止める）
         self._sample_cache = {}         # (speaker_uuid, style_id) -> サンプルWAV
         self._shape_report = {}         # 整形レポート {"removed": [...], "confusables": [...]}
         self._report_win = None         # 整形レポートのウィンドウ（多重表示防止）
@@ -1976,11 +1977,24 @@ class App(_Base):
                       lambda *_: disp.set(var.get().replace(" ", "\u00a0")))
         return disp
 
+    def destroy(self):
+        """窓を閉じる。行の並び直しの予約は先に取り消す。macOS の Tk は、窓を壊す
+        途中でたまっていた after_idle を動かすことがあり、壊れかけの部品を測ったり
+        並べ替えたりして Tk ごと落ちていた（CI の macOS の GUI テストで再現）。"""
+        self._destroying = True
+        if self._reflow_after is not None:
+            try:
+                self.after_cancel(self._reflow_after)
+            except tk.TclError:
+                pass
+            self._reflow_after = None
+        super().destroy()
+
     def _schedule_reflow(self, event=None):
         """窓の幅や文の長さが変わったら、行の並び（_reflow）を1回だけやり直す。
         リサイズ中は <Configure> が連発するので、after_idle でまとめる。"""
-        if self._reflow_after is not None:
-            return   # 予約済み
+        if self._reflow_after is not None or self._destroying:
+            return   # 予約済み・閉じている最中
         try:
             self._reflow_after = self.after_idle(self._reflow)
         except tk.TclError:
@@ -1989,14 +2003,17 @@ class App(_Base):
     def _reflow(self):
         """狭い窓で切れていた3か所の並びを、今の幅に合わせて自動で決める。
         どれも「今の並び」に左右されない幅（部品の必要な幅と、行の実際の幅）で
-        決めるので、並びを変えたせいでまた並びが変わる、という行き来は起きない。"""
+        決めるので、並びを変えたせいでまた並びが変わる、という行き来は起きない。
+        ここでは update_idletasks を呼ばない（macOS の Tk は、after_idle の中から
+        もう一度ためた処理を回すと落ちることがある）。測った幅が古くても、並べ終わって
+        本文欄の <Configure> が来たら、もう一度ここが動いて正しい並びになる。"""
         self._reflow_after = None
+        if self._destroying:
+            return
         try:
-            self.update_idletasks()   # 部品の必要な幅を最新にしてから測る
             self._reflow_run_row()
             self._reflow_voice_row()
             self._reflow_result_bar()
-            self.update_idletasks()   # 横の並び替えで変わった高さを反映してから
             self._reflow_height()
         except (tk.TclError, AttributeError):
             pass   # 構築途中（まだ無い行がある）・終了中は無視
@@ -5460,7 +5477,8 @@ class App(_Base):
         # 検索は本文を隠さないよう、真ん中ではなく本文欄の右上に出す
         self._place_dialog(win, near=lambda w, h: (
             self.text.winfo_rootx() + self.text.winfo_width() - w - _px(24),
-            self.text.winfo_rooty() + _px(8)))
+            self.text.winfo_rooty() + _px(8)),
+            focus=lambda: self._search_entry)
         self._search_win = win
         row = ttk.Frame(win); row.pack(fill="x", padx=6, pady=6)
         self._search_var = tk.StringVar()
@@ -5913,17 +5931,22 @@ class App(_Base):
         except Exception:
             return w, h, x, y
 
-    def _place_dialog(self, win, near=None):
+    def _place_dialog(self, win, near=None, focus=None):
         """小さな窓（エラー・完了・キャッシュ等）を本体の真ん中に出す。near を渡すと、
-        near(幅, 高さ) が返す位置に出す。以前は Tk 任せで、本体がどこにあっても画面の
+        near(幅, 高さ) が返す位置に出す。focus には、出したあと入力を受ける部品を返す
+        関数を渡す（隠している間の focus_set は Tk が覚えないため、出してから当てる）。以前は Tk 任せで、本体がどこにあっても画面の
         左上 (9,38) に出ていた（本体を2台目の画面に置くと、エラーの窓が別の画面に出て
         気づけない）。窓を作った直後に呼ぶ。中身ができるまで隠しておき、大きさが
-        決まってから置く。"""
+        決まってから置く（50ms 待つあいだに Tk が並べ終える。update_idletasks は
+        macOS の Tk で落ちることがあるので使わない）。"""
         win.withdraw()
 
         def place():
+            if self._destroying:
+                return
             try:
-                win.update_idletasks()
+                if not win.winfo_exists():
+                    return
                 m = re.match(r"(\d+)x(\d+)", win.geometry())
                 w = int(m[1]) if m and int(m[1]) > 1 else win.winfo_reqwidth()
                 h = int(m[2]) if m and int(m[2]) > 1 else win.winfo_reqheight()
@@ -5935,9 +5958,15 @@ class App(_Base):
                 _w, _h, x, y = self._fit_to_work_area(w, h, x, y)
                 win.geometry(f"+{x}+{y}")
                 win.deiconify()
+                # 入力を受ける部品（検索窓の入力欄など）へ入力を移す。移さないと、
+                # 検索を開いてすぐ打った字が本文に入ってしまう
+                if focus is not None:
+                    target = focus()
+                    if target is not None and target.winfo_exists():
+                        target.focus_set()
             except tk.TclError:
                 pass   # 置く前に閉じられた
-        win.after_idle(place)
+        win.after(50, place)
 
     def _virtual_screen(self):
         """全モニタを合わせた範囲 (x, y, 幅, 高さ)。左や上のモニタは x, y が負になる。
