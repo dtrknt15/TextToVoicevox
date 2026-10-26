@@ -49,6 +49,15 @@ import core
 
 FEEDBACK_URL = ("https://github.com/rakuyou211-blip/TextToVoicevox/issues/new"
                 "?template=feedback.yml")
+# 「💬 感想を送る」の行き先。アカウント無しで送れる Googleフォーム（ログイン不要の
+# 設定）。GitHub の投稿フォームは GitHub のアカウントが無いと送れず、このアプリを
+# 使ってほしい人の多くがそこで止まっていた。空のあいだは GitHub を開く。
+# FORM_URL は「…/viewform」まで。ENV_ENTRY は「アプリの版・OS」欄の entry.番号
+# （フォームの「事前入力した URL を取得」で分かる）で、版とOSを入れた状態で開く。
+# 送る人は中身を見てから送るので、黙って集めることにはならない
+FEEDBACK_FORM_URL = ("https://docs.google.com/forms/d/e/"
+                     "1FAIpQLSfHMtYozt4m_yHkdi569i-FALb_4JuwhMPS6qH4I8zU1nqy2A/viewform")
+FEEDBACK_FORM_ENV_ENTRY = "entry.1044076331"   # 「Mac版/Windows版」の欄
 
 try:
     import mp4chapters   # M4Bオーディオブックのチャプター埋め込み（純Python・同梱）
@@ -65,6 +74,15 @@ class _EitherEvent:
 
     def is_set(self):
         return any(e.is_set() for e in self._events)
+
+
+class _LineSynthError(Exception):
+    """音声生成で、ある1行だけがエンジンに断られ続けた（リトライしても失敗した）。
+    何番目のジョブかを UI まで運ぶための入れ物で、元の例外は __cause__ に入る。
+    以前は生の例外がそのまま出て、長い本だとどの行を直せばいいか分からなかった。"""
+    def __init__(self, index):
+        super().__init__(index)
+        self.index = index
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_PATH = os.path.join(APP_DIR, "settings.json")
@@ -130,6 +148,7 @@ def _write_atomic(path, data):
 
 APP_TITLE = f"テキスト抽出 → VOICEVOX  v{core.APP_VERSION}（オフライン）"
 VOICEVOX_DEFAULT = "http://127.0.0.1:50021"
+VOICEVOX_SITE = "https://voicevox.hiroshiba.jp/"   # VOICEVOX の入手先（公式サイト）
 ALL_EXT = sorted(core.IMG_EXT | core.PDF_EXT | core.DOC_EXT)
 
 # OS別のUIフォント（Noneなら環境の既定フォントを使う）
@@ -175,6 +194,21 @@ PAD_X = _px(8)   # セクション外周の水平余白
 PAD_Y = _px(6)   # セクション外周の垂直余白
 GAPX = _px(6)    # 同一行のラベルと入力欄・小ブロック間の間隔
 GAPY = _px(4)    # grid の行間
+
+
+def _fit_rect_in_work_area(w, h, x, y, work, frame_x, frame_y, caption):
+    """Tk の geometry（中身の幅・高さ w, h と、外枠の左上 x, y）を、画面の作業領域
+    work=(左, 上, 右, 下)（タスクバーを除いた所）に収める。はみ出すときはまず
+    動かし、それでも入らないときだけ縮める。
+    外枠は 左右と下に frame_x / frame_y、上にタイトルバー caption ぶん中身より大きい。
+    Windows 10 以降はこの左右と下の枠が見えないリサイズ用の縁なので、そこは
+    作業領域の外に出てもよい（画面端にスナップした窓もそうなっている）。"""
+    wl, wt, wr, wb = work
+    w = max(1, min(w, wr - wl))
+    h = max(1, min(h, wb - wt - caption - frame_y))
+    x = max(wl - frame_x, min(x, wr - w - frame_x))
+    y = max(wt, min(y, wb - caption - h - frame_y))
+    return w, h, x, y
 
 
 class _Tooltip:
@@ -263,7 +297,11 @@ class App(_Base):
         except Exception:
             room = _px(880)
         height = max(min(_px(880), room), _px(560))
-        self.geometry(f"{_px(980)}x{height}")
+        # Windows は位置まで決めて、タスクバーを除いた所に収める。位置を OS 任せに
+        # すると、1920x1080 の125%表示などでは窓の下端がタスクバーの裏に入り、
+        # いちばん下の「再生・生成」の行が見えなかった（その位置が保存されて毎回続く）
+        w, height, x, y = self._fit_to_work_area(_px(980), height)
+        self.geometry(f"{w}x{height}" + (f"+{x}+{y}" if x is not None else ""))
         self.minsize(_px(860), min(_px(700), height))
         # 構築中（Windowsは絵文字フォントの初回読み込みだけで最大1秒近く固まる）は
         # 本体を隠し、代わりに小さな「起動しています」窓を出す。ダブルクリックから
@@ -314,9 +352,12 @@ class App(_Base):
         self._bookmark = None           # 連続再生のしおり（最後に再生した行番号）
         self._saved_dlg_speaker = None  # 設定から復元するセリフ話者ラベル
         self._cleared_text = None       # 「本文を全消去」で退避した本文（復元用）
+        self._cleared_bookmark = None   # そのときのしおり（復元で一緒に戻す）
         self._suppress_modified = False  # <<Modified>>ハンドラの一時抑止（全消去/復元の自編集用）
         self._vdetail_open = False      # プリセット/セリフ行の開閉状態（§4の折りたたみ）
         self._resize_after = None       # <Configure>デバウンス用のafterハンドル
+        self._reflow_after = None       # 行の並び直し（_reflow）の予約
+        self._destroying = False        # 窓を壊している最中か（予約した処理を止める）
         self._sample_cache = {}         # (speaker_uuid, style_id) -> サンプルWAV
         self._shape_report = {}         # 整形レポート {"removed": [...], "confusables": [...]}
         self._report_win = None         # 整形レポートのウィンドウ（多重表示防止）
@@ -421,8 +462,8 @@ class App(_Base):
         if os.path.exists(SETTINGS_PATH):
             first = f"{hello} まずは 1. にファイルを追加してね🍂"
         else:
-            first = (f"{hello} はじめまして！ ①ファイル追加 → ②抽出 → "
-                     "③音声生成 の3ステップだよ🍂")
+            first = (f"{hello} はじめまして！ ファイルを入れると文字を取り出すよ。"
+                     "あとは ▶ 再生で聴くだけ🍂")
         self.status_var = tk.StringVar(value=first)
         # 右にキャラ立ち絵パネル（あれば）、左にメイン。右を先に side="right" で確保して
         # 幅をリザーブし、メインは残りを expand で埋める。狭い窓では立ち絵を自動で畳む。
@@ -447,6 +488,10 @@ class App(_Base):
 
         if self._side is not None:
             self.bind("<Configure>", self._on_configure, add="+")
+        # メインの幅が変わったら（窓のリサイズ・立ち絵の開閉）、行の並びを決め直す。
+        # 本文欄の高さが変わったとき（行の出し入れ）も、畳むかどうかを決め直す
+        self._main.bind("<Configure>", self._schedule_reflow, add="+")
+        self.text.bind("<Configure>", self._schedule_reflow, add="+")
 
     # ---------------- スタイル（フォント） ----------------
     def _setup_styles(self):
@@ -614,6 +659,10 @@ class App(_Base):
             _Tooltip(cb, tip)
         for cidx in range(1, 4):
             common.columnconfigure(cidx, weight=1)
+        # 窓が低いときに畳む行（_reflow_height）。本文欄に高さを回すため
+        self._opt_rows = (basic, common)
+        self._opt_hidden = False   # 低い窓なので畳んでいるか
+        self._opt_forced = False   # 低い窓だが、手で開いているか
 
         # 折りたたみ対象（既定は畳む＝pack しない。子ツリーには繋がるのでD&D登録は効く）
         self._adv_open = False
@@ -649,6 +698,12 @@ class App(_Base):
         _Tooltip(self.extract_btn,
                  "追加したファイルからテキストを抽出します"
                  f"（{'⌘' if core.IS_MAC else 'Ctrl+'}Return）。")
+        # 抽出オプションを畳んでいるときだけ出す（_reflow_height）
+        self._opt_toggle = ttk.Button(run, text="⚙ オプション ▸",
+                                      command=self._toggle_opt_rows)
+        _Tooltip(self._opt_toggle,
+                 "窓が低いので、改行の扱い・PDF処理・整形の設定を畳んでいます。\n"
+                 "押すと開きます（窓を高くすると自動で戻ります）。")
         self.progress = ttk.Progressbar(run, mode="determinate", length=_px(240))
         self.progress.pack(side="left", padx=10)
         # テーマ選択（🍂ライト/🌙ダーク/☀️くっきり/🌿ずんだ）。
@@ -658,15 +713,34 @@ class App(_Base):
         fb = ttk.Label(run, text="💬 感想を送る", style="Link.TLabel", cursor="hand2")
         fb.pack(side="right", padx=(GAPX, 0))
         fb.bind("<Button-1>", lambda e: self._open_feedback())
-        _Tooltip(fb, "使ってみた一言を送れます（ブラウザで感想フォームが開きます）。")
+        _Tooltip(fb, "使ってみた一言を送れます（ブラウザで感想フォームが開きます"
+                     + ("。アカウントは要りません）。" if FEEDBACK_FORM_URL else "）。"))
         self.theme_cb = ttk.Combobox(run, width=12, state="readonly",
                                      values=[l for _k, l, _p in self.THEMES])
         self.theme_cb.pack(side="right", padx=4)
         self.theme_cb.bind("<<ComboboxSelected>>", self._theme_selected)
         ttk.Label(run, text="テーマ:").pack(side="right")
         # status_var は _build_ui 冒頭で生成済み（吹き出しと共有）。最後にpack＝
-        # 長い状態文があふれた時はここだけが縮み、ボタンやテーマ選択は消えない
-        ttk.Label(run, textvariable=self.status_var).pack(side="left")
+        # 長い状態文があふれた時はここだけが縮み、ボタンやテーマ選択は消えない。
+        # 入りきらない文は折り返す（以前は右のテーマ欄の手前で切れ、「はじめまして！
+        # ①ファ」のように途中で消えていた）。高さは2行ぶんで固定して（_reflow_run_row）、
+        # 文の長さで下の欄が上下に動かないようにする。3行以上になる文は先頭2行を見せ、
+        # 全文はマウスを乗せると出す
+        box = ttk.Frame(run, width=1)
+        box.pack(side="left", fill="both", expand=True)
+        box.pack_propagate(False)
+        self._status_box = box
+        self.status_var.trace_add("write", lambda *_: self._schedule_reflow())
+        self._status_lbl = ttk.Label(box,
+                                     textvariable=self._wrapping_copy(self.status_var),
+                                     anchor="w", justify="left")
+        self._status_lbl.pack(fill="both", expand=True)
+        box.bind("<Configure>", lambda e: self._status_lbl.configure(
+            wraplength=max(e.width - _px(4), _px(80))), add="+")
+        _Tooltip(self._status_lbl, lambda: (
+            self.status_var.get()
+            if self._status_lbl.winfo_reqheight() > self._status_box.winfo_height()
+            else ""))
 
     def _toggle_advanced(self):
         self._set_advanced(not self._adv_open)
@@ -674,7 +748,7 @@ class App(_Base):
     def _set_advanced(self, show):
         """整形の詳細設定パネルを開閉する（pack/pack_forget と矢印表示の更新のみ）。"""
         self._adv_open = bool(show)
-        if self._adv_open:
+        if self._adv_open and not self._opt_hidden:   # 畳んでいる間は戻すときに出す
             self._adv_frame.pack(fill="x", padx=GAPX, pady=(2, 0),
                                  before=self._run_frame)
             self._adv_btn.config(text="詳細設定 ▾")
@@ -801,29 +875,39 @@ class App(_Base):
         self._conn_edit_btn = ttk.Button(c, text="接続設定…", width=10,
                                          command=lambda: self._set_conn_compact(False))
         _Tooltip(self._conn_edit_btn, "URL変更や再接続が必要なときに開きます。")
-        self.engine_var = tk.StringVar(value="エンジン: 未接続")
-        self.engine_lbl = ttk.Label(c, textvariable=self.engine_var)
-        self.engine_lbl.pack(side="left", padx=GAPX)
+        # キャッシュ…ボタンは状態表示より先に詰める（pack は後に詰めたものから縮む）。
+        # 以前は逆で、狭い窓で「未接続（VOICEVOXを起動してください）」のような長い
+        # 状態が出ると、ボタンが窓の外へ押し出されていた。状態表示は残りの幅に
+        # 合わせて折り返す（width=1 で必要な幅を最小にし、実際の幅は fill で受け取る）
         self.cache_btn = ttk.Button(c, text="キャッシュ…", width=10,
                                     command=self.open_cache_dialog)
         self.cache_btn.pack(side="right")
+        self.engine_var = tk.StringVar(value="エンジン: 未接続")
+        self.engine_lbl = ttk.Label(c, textvariable=self._wrapping_copy(self.engine_var),
+                                    width=1)
+        self.engine_lbl.pack(side="left", padx=GAPX, fill="x", expand=True)
+        self.engine_lbl.bind("<Configure>", lambda e: self.engine_lbl.configure(
+            wraplength=max(e.width, _px(80))), add="+")
         _Tooltip(self.cache_btn,
                  "合成キャッシュ（2回目以降の生成・再生を速くする仕組み）の\n"
                  "容量確認・上限変更・削除ができます。")
         _sep()
 
-        # === 声・調整（話速/音高/抑揚/音量を grid の列で揃える。1行に収める） ===
+        # === 声・調整（話速/音高/抑揚/音量を grid の列で揃える。入るなら1行に収める） ===
         va = ttk.Frame(bottom)
         va.pack(fill="x", padx=GAPX)
-        ttk.Label(va, text="声・調整", style="Cluster.TLabel").pack(side="left", padx=(0, GAPX))
+        va_head = ttk.Label(va, text="声・調整", style="Cluster.TLabel")
+        va_head.pack(side="left", padx=(0, GAPX))
         # 話者選択は2段（キャラ→スタイル）。170超のスタイルが1本に並ぶ長大な
         # ドロップダウンを解消する。speaker_cb はそのキャラのスタイルだけを持つ
         ttk.Label(va, text="話者:").pack(side="left")
-        self.char_cb = ttk.Combobox(va, width=13, state="disabled")
+        # 幅は、125%表示の既定の窓で声・調整が1行に収まる大きさ（13/14 だと3px足りず、
+        # 話速〜音量が2行目へ回って本文欄が1行ぶん低くなっていた）
+        self.char_cb = ttk.Combobox(va, width=12, state="disabled")
         self.char_cb.pack(side="left", padx=(2, 2))
         self.char_cb.bind("<<ComboboxSelected>>", self._char_selected)
         _Tooltip(self.char_cb, "キャラクターを選びます（スタイルは右で選択）。")
-        self.speaker_cb = ttk.Combobox(va, width=14, state="disabled")
+        self.speaker_cb = ttk.Combobox(va, width=13, state="disabled")
         self.speaker_cb.pack(side="left", padx=(0, 2))
         self.speaker_cb.bind("<<ComboboxSelected>>", self._update_portrait, add="+")
         # 声を選び直したら、その声のモデルを裏で読み込ませておく
@@ -847,8 +931,15 @@ class App(_Base):
         self._vdetail_btn.pack(side="right")
         _Tooltip(self._vdetail_btn,
                  "声のプリセット保存と、セリフ行（「」開始）を別話者で読む設定を開閉します。")
-        params = ttk.Frame(va)
-        params.pack(side="left")
+        # 話速〜音量は、1行に入らない窓では下の行（va2）へ送る（_reflow_voice_row）。
+        # 以前は狭い窓で「音量」が窓の外へ押し出され、音量を変えられなかった。
+        # どちらの行にも置けるよう、親は両方の親（bottom）にする（pack の in_ の決まり）。
+        # va・va2 より後に作るので、重なり順でも両方の上に出る
+        va2 = ttk.Frame(bottom)
+        params = ttk.Frame(bottom)
+        params.pack(in_=va, side="left")
+        self._voice_rows = (va, va2, params, va_head)
+        self._voice_one = True
         self.speed_var = tk.DoubleVar(value=1.0)
         self.pitch_var = tk.DoubleVar(value=0.0)
         self.into_var = tk.DoubleVar(value=1.0)
@@ -946,10 +1037,12 @@ class App(_Base):
                  "（調整していないときは何も待ちません）。")
         _sep()
 
-        # === 再生・生成 ===
+        # === 試聴・生成 ===
+        # 連続再生・一時停止・続きから・停止は、本文のすぐ下の再生バー（§3）へ移した
+        # （_build_player_bar）。ここには1行の試聴と、ファイルへの書き出しを残す
         p = ttk.Frame(bottom)
         p.pack(fill="x", padx=GAPX, pady=(0, GAPY))
-        ttk.Label(p, text="再生・生成", style="Cluster.TLabel").pack(side="left", padx=(0, GAPX))
+        ttk.Label(p, text="試聴・生成", style="Cluster.TLabel").pack(side="left", padx=(0, GAPX))
         # 仕上げの主要ボタンは右端（終端位置＝マウスを流す先）に大きく。packは後詰めから
         # 切れるため、主要ボタンを最初に確保して狭い窓でも必ず残す。辞書は誤クリック防止に
         # 間隔をあけ、優先度が低いので最後（＝最初に畳まれる）
@@ -966,34 +1059,6 @@ class App(_Base):
         self.preview_btn.pack(side="left")
         _Tooltip(self.preview_btn, self._tip_engine_gate(
             f"カーソルのある行を1行だけ試し聴きします（{mod}P）。"))
-        self.playall_btn = ttk.Button(p, text="▶▶ 連続再生",
-                                      command=self.play_all, state="disabled")
-        self.playall_btn.pack(side="left", padx=4)
-        _Tooltip(self.playall_btn, self._tip_engine_gate(
-            "本文の最初から順に読み上げます。\n"
-            "途中から聴きたいときは、その行を右クリック →「ここから連続再生」。"))
-        self.pause_btn = ttk.Button(p, text="⏸ 一時停止", width=10,
-                                    command=self.toggle_pause, state="disabled")
-        self.pause_btn.pack(side="left", padx=4)
-        _Tooltip(self.pause_btn,
-                 "連続再生を一時停止/再開します（スペースキー）。\n"
-                 "再開すると同じ行の頭から読み直します。")
-        self.resume_btn = ttk.Button(p, text="⏵ 続きから",
-                                     command=self.play_from_bookmark, state="disabled")
-        self.resume_btn.pack(side="left", padx=4)
-
-        def _resume_tip():
-            if not self._engine_ready():
-                return ("VOICEVOXエンジン接続後、連続再生すると\n"
-                        "しおりが作られ、続きから再生できます。")
-            if self._bookmark is None:
-                return "連続再生するとしおり（最後に再生した行）が作られ、続きから再生できます。"
-            return "前回の続き（しおりの行）から再生します。"
-        _Tooltip(self.resume_btn, _resume_tip)
-        self.stop_btn = ttk.Button(p, text="■ 停止",
-                                   command=self.stop_playall, state="disabled")
-        self.stop_btn.pack(side="left", padx=4)
-        _Tooltip(self.stop_btn, "再生を停止します（Esc。再生中だけ押せます）。")
         self.dict_btn = ttk.Button(p, text="読み方辞書...",
                                    command=self.open_dict_dialog, state="disabled")
         self.dict_btn.pack(side="right", padx=(0, 14))
@@ -1006,17 +1071,23 @@ class App(_Base):
         mid = ttk.LabelFrame(self._main, text="3. ✏️ 抽出結果（手動で修正できます）")
         mid.pack(fill="both", expand=True, padx=PAD_X, pady=PAD_Y // 2)
 
-        # 一括置換バー
-        rep = ttk.Frame(mid)
-        rep.pack(fill="x", padx=GAPX, pady=(GAPY, 0))
+        # 一括置換バー（bar）。置換の道具（rep）と本文の情報（info: 行数・レポート・
+        # 全消去）を窓の幅で並べ分ける（_reflow_result_bar）。入るなら1行、入らない
+        # なら info を本文の下の行（foot）へ送る。以前は全部を1行に並べていて、既定の幅
+        # （125%表示）で必要な1531pxに対し1187pxしかなく、右端の全消去と行数が窓の外に
+        # 切れていた。入力欄は窓の幅に合わせて伸び縮みさせる
+        bar = ttk.Frame(mid)
+        bar.pack(fill="x", padx=GAPX, pady=(GAPY, 0))
+        rep = ttk.Frame(bar)
+        rep.pack(side="left", fill="x", expand=True)
         ttk.Label(rep, text="一括置換:").pack(side="left")
         self.find_var = tk.StringVar()
         self.repl_var = tk.StringVar()
-        fe = ttk.Entry(rep, textvariable=self.find_var, width=18)
-        fe.pack(side="left", padx=2)
+        fe = ttk.Entry(rep, textvariable=self.find_var, width=10)
+        fe.pack(side="left", padx=2, fill="x", expand=True)
         ttk.Label(rep, text="→").pack(side="left")
-        re_ = ttk.Entry(rep, textvariable=self.repl_var, width=18)
-        re_.pack(side="left", padx=2)
+        re_ = ttk.Entry(rep, textvariable=self.repl_var, width=10)
+        re_.pack(side="left", padx=2, fill="x", expand=True)
         ttk.Button(rep, text="すべて置換", command=self.replace_all_text).pack(side="left", padx=4)
         fe.bind("<Return>", lambda e: self.replace_all_text())
         re_.bind("<Return>", lambda e: self.replace_all_text())
@@ -1026,7 +1097,8 @@ class App(_Base):
         self.rule_cb.pack(side="left", padx=2)
         self.rule_cb.bind("<<ComboboxSelected>>", self._rule_selected)
         # 低頻度の「登録/削除」はメニューにまとめ、最頻用の「全ルール適用」だけボタンで残す
-        self.rule_menu_btn = ttk.Menubutton(rep, text="ルール ▾", width=8)
+        self.rule_menu_btn = ttk.Menubutton(rep, text="ルール ▾", width=8,
+                                            style="Plain.TMenubutton")
         rule_menu = tk.Menu(self.rule_menu_btn, tearoff=0)
         rule_menu.add_command(label="今の置換内容をルールに登録", command=self.add_rule)
         rule_menu.add_command(label="選択中のルールを削除", command=self.del_rule)
@@ -1034,31 +1106,47 @@ class App(_Base):
         self.rule_menu_btn.pack(side="left", padx=1)
         _Tooltip(self.rule_menu_btn, "置換ルールの登録・削除（保存され次回起動時も使えます）。")
         ttk.Button(rep, text="全ルール適用", command=self.apply_all_rules).pack(side="left", padx=4)
-        self.report_btn = ttk.Button(rep, text="レポート", width=7,
+
+        # 再生バー（いちばん下）。本文より先に side="bottom" で確保する
+        self._build_player_bar(mid)
+        # 本文の下の行（エディタの状態表示のように）: 左に行数・文字数・めやす、
+        # 右に整形レポートと全消去。本文より先に side="bottom" で確保し、窓が
+        # 低くても本文欄に押し出されないようにする。1行に入る幅のときは畳む
+        foot = ttk.Frame(mid)
+        foot.pack(side="bottom", fill="x", padx=GAPX, pady=(0, GAPY))
+        # info はどちらの行にも置けるよう、親は両方の親（mid）にする（pack の in_ の
+        # 決まり）。bar・foot より後に作るので、重なり順でも両方の上に出る
+        info = ttk.Frame(mid)
+        info.pack(in_=foot, fill="x", expand=True)
+        # 本文の全消去 / 復元は1ボタンで切替（押せない「復元」を常設しない）。
+        # 属性名 restore_btn は結線・テストの互換のため維持。幅固定でラベル切替時に跳ねない
+        self.restore_btn = ttk.Button(info, text="本文を全消去", width=13,
+                                      command=self.clear_text)
+        self.restore_btn.pack(side="right", padx=2)
+        _Tooltip(self.restore_btn, lambda: (
+            "全消去した本文を元に戻します。" if self._cleared_text is not None
+            else "本文をすべて消します（直後に「復元」で戻せます）。"))
+        self.report_btn = ttk.Button(info, text="レポート", width=7,
                                      command=self.show_shape_report,
                                      state="disabled")
-        self.report_btn.pack(side="left", padx=1)
+        self.report_btn.pack(side="right", padx=2)
         _Tooltip(self.report_btn, lambda: (
             "ノイズ除去で消えた行とOCR誤字補正の内容を確認できます。"
             if (self._shape_report.get("removed")
                 or self._shape_report.get("confusables"))
             else "抽出すると、ノイズ除去・誤字補正の内容をここで確認できます。"))
-        # 本文の全消去 / 復元は1ボタンで切替（押せない「復元」を常設しない）。
-        # 属性名 restore_btn は結線・テストの互換のため維持。幅固定でラベル切替時に跳ねない
-        self.restore_btn = ttk.Button(rep, text="本文を全消去", width=13,
-                                      command=self.clear_text)
-        self.restore_btn.pack(side="right", padx=2)
         # 行数・文字数・読み上げめやすの常時表示（台本編集中に常に見たい情報。
-        # 従来は抽出完了の一瞬だけ状態欄に出て他のメッセージで流れていた）
+        # 従来は抽出完了の一瞬だけ状態欄に出て他のメッセージで流れていた）。
+        # ボタンより後に詰めるので、幅が足りないときはボタンではなくこちらが縮む
         self.stats_var = tk.StringVar()
-        ttk.Label(rep, textvariable=self.stats_var).pack(side="right",
-                                                         padx=(0, 8))
-        _Tooltip(self.restore_btn, lambda: (
-            "全消去した本文を元に戻します。" if self._cleared_text is not None
-            else "本文をすべて消します（直後に「復元」で戻せます）。"))
+        ttk.Label(info, textvariable=self.stats_var).pack(side="left")
+        # 行数の文字が伸び縮みすると info の幅も変わるので、並びを見直す
+        self.stats_var.trace_add("write", lambda *_: self._schedule_reflow())
 
         body = ttk.Frame(mid)
         body.pack(fill="both", expand=True)
+        self._rbar = (bar, rep, info, foot, body)
+        self._rbar_one = False
         self.text_font = tkfont.Font(font=(TEXT_FONT or "TkTextFont"))
         self.text = tk.Text(body, wrap="word", undo=True, font=self.text_font)
         self.text.pack(side="left", fill="both", expand=True, padx=4, pady=4)
@@ -1125,6 +1213,210 @@ class App(_Base):
         self._search_win = None
         self._search_hits = []
         self._search_idx = -1
+
+    # ---------------- §3 再生バー（本文のすぐ下） ----------------
+    def _build_player_bar(self, parent):
+        """聴くための操作を本文のすぐ下にまとめる（前の行・再生/一時停止・次の行・
+        停止・最初から・速さ・位置）。以前は 4. のいちばん下にあって本文から遠く、
+        窓によってはタスクバーの裏に隠れていた。ボタンの属性名（playall_btn・
+        pause_btn・stop_btn・resume_btn）は、押せる/押せないの切り替えが各所に
+        あるので変えない。"""
+        bar = ttk.Frame(parent)
+        bar.pack(side="bottom", fill="x", padx=GAPX, pady=GAPY)
+
+        # 起動したとき、しおりがあれば出す「前回の続き」（_show_resume）。ふだんは畳む
+        self._resume_row = ttk.Frame(bar)
+        self._resume_var = tk.StringVar()
+        ttk.Label(self._resume_row, textvariable=self._resume_var).pack(side="left")
+        self.resume_btn = ttk.Button(self._resume_row, text="⏵ 続きを聴く",
+                                     command=self.play_from_bookmark, state="disabled")
+        self.resume_btn.pack(side="left", padx=GAPX)
+
+        def _resume_tip():
+            if not self._engine_ready():
+                return "VOICEVOXエンジンにつながると押せます。"
+            return "前回の続き（しおりの行）から読み上げます。"
+        _Tooltip(self.resume_btn, _resume_tip)
+        ttk.Button(self._resume_row, text="×", width=3,
+                   command=self._hide_resume).pack(side="left")
+
+        ctl = ttk.Frame(bar)
+        ctl.pack(fill="x")
+        self._player_ctl = ctl
+        self.prev_btn = ttk.Button(ctl, text="⏮ 前の行",
+                                   command=lambda: self._play_step(-1))
+        self.prev_btn.pack(side="left")
+        _Tooltip(self.prev_btn, "ひとつ前の行へ。再生中なら、そこから読み直します。")
+        # ▶ 再生 と ⏸ 一時停止 は同じ場所に、どちらか一方だけ出す（_sync_play_buttons）
+        # 幅は2つでそろえる（入れ替えたときに右の部品が動かないように）。
+        # 10 だと「⏸ 一時停止」の最後の字が切れた
+        self.playall_btn = ttk.Button(ctl, text="▶ 再生", width=12,
+                                      command=self.play_from_cursor, state="disabled")
+        self.playall_btn.pack(side="left", padx=(4, 0))
+        _Tooltip(self.playall_btn, self._tip_engine_gate(
+            "カーソルのある行から最後まで読み上げます。\n"
+            "本文をクリックした所から聴けます（止めたあと押せば、その続きから）。"))
+        self.pause_btn = ttk.Button(ctl, text="⏸ 一時停止", width=12,
+                                    command=self.toggle_pause, state="disabled")
+        _Tooltip(self.pause_btn,
+                 "一時停止/再開します（スペースキー）。\n"
+                 "再開すると同じ行の頭から読み直します。")
+        self.next_btn = ttk.Button(ctl, text="⏭ 次の行",
+                                   command=lambda: self._play_step(+1))
+        self.next_btn.pack(side="left", padx=(4, 0))
+        _Tooltip(self.next_btn, "ひとつ次の行へ。再生中なら、そこから読み直します。")
+        self.stop_btn = ttk.Button(ctl, text="■ 停止",
+                                   command=self.stop_playall, state="disabled")
+        self.stop_btn.pack(side="left", padx=(4, 0))
+        _Tooltip(self.stop_btn, "再生を停止します（Esc。再生中だけ押せます）。")
+        top_btn = ttk.Button(ctl, text="⏪ 最初から", command=self._play_from_top)
+        top_btn.pack(side="left", padx=(4, 0))
+        _Tooltip(top_btn, "本文の最初から読み上げます（再生中なら頭に戻ります）。")
+        ttk.Separator(ctl, orient="vertical").pack(side="left", fill="y",
+                                                   padx=GAPX * 2)
+        # 速さは 4. の話速（speed_var）と同じ値。どちらで変えても両方がそろう
+        ttk.Label(ctl, text="速さ").pack(side="left")
+        self._speed_text = tk.StringVar(value="1.0")
+        self._speed_scale = ttk.Scale(ctl, from_=0.5, to=2.0, orient="horizontal",
+                                      length=_px(110), command=self._on_speed_scale)
+        self._speed_scale.set(1.0)
+        self._speed_scale.pack(side="left", padx=(4, 2))
+        ttk.Label(ctl, textvariable=self._speed_text, width=4).pack(side="left")
+        _Tooltip(self._speed_scale,
+                 "読み上げの速さ（4. の話速と同じ値です）。\n"
+                 "再生中に変えると、今の行の頭から新しい速さで読み直します。")
+        self.speed_var.trace_add("write", self._on_speed_var)
+        # いま何行目か（読み上げる行のうち）と、その割合
+        self._pos_var = tk.StringVar()
+        ttk.Label(ctl, textvariable=self._pos_var).pack(side="right")
+        self._play_prog = ttk.Progressbar(ctl, mode="determinate", length=_px(60))
+        self._play_prog.pack(side="left", fill="x", expand=True, padx=GAPX * 2)
+        self._play_pos = {}   # 行番号 → 読み上げる行のうち何番目か（再生のたび作る）
+
+    def _sync_play_buttons(self):
+        """連続再生中は ▶ 再生 の場所に ⏸ 一時停止 を出す（同じ所を押せば止まる/動く）。"""
+        playing = self._playall_pause is not None
+        show, hide = ((self.pause_btn, self.playall_btn) if playing
+                      else (self.playall_btn, self.pause_btn))
+        if not show.winfo_manager():
+            hide.pack_forget()
+            show.pack(side="left", padx=(4, 0), before=self.next_btn)
+
+    def _set_position(self, lineno):
+        """再生バーの「何行目 / 全部で何行」と進み具合を、行番号から出す。"""
+        total = len(self._play_pos)
+        i = self._play_pos.get(lineno)
+        if i is None or not total:
+            return
+        self._pos_var.set(f"{i + 1:,} / {total:,}行")
+        self._play_prog.config(maximum=total, value=i + 1)
+
+    def _speakable_lines(self, default_id=None):
+        """読み上げる行の一覧 [(行番号, 読む文, style_id)]。空行・＃メモ行・
+        @タグだけの行は除く。連続再生と、前の行/次の行の移動で同じ決まりを使う。"""
+        numbered = []
+        for i, ln in enumerate(self.text.get("1.0", "end-1c").split("\n"), start=1):
+            if not ln.strip() or core.is_memo_line(ln):
+                continue   # 空行・メモ行（行頭#）は読まない
+            spoken, sp = self._resolve_line(ln.strip())
+            if spoken.strip():
+                numbered.append((i, spoken, sp[1] if sp else default_id))
+        return numbered
+
+    def _play_step(self, delta):
+        """前の行（-1）・次の行（+1）へ。再生中ならそこから読み直し、止まっている
+        ときは行を移って印を付けるだけ（▶ 再生でそこから読める）。"""
+        lines = [t[0] for t in self._speakable_lines()]
+        if not lines:
+            self.status_var.set("再生するテキストがありません。")
+            return
+        if self._playall_pause is not None and self._bookmark is not None:
+            cur = self._bookmark   # 再生中は、いま読んでいる行が基準
+        else:
+            cur = int(self.text.index("insert").split(".")[0])
+        if delta < 0:
+            target = next((n for n in reversed(lines) if n < cur), None)
+        else:
+            target = next((n for n in lines if n > cur), None)
+        if target is None:
+            self.status_var.set("ここが最初の行です。" if delta < 0
+                                else "ここが最後の行です。")
+            return
+        self._play_jump(target)
+
+    def _play_from_top(self):
+        """最初から読む。再生中なら、止めて頭から読み直す。"""
+        lines = self._speakable_lines()
+        if not lines:
+            self.status_var.set("再生するテキストがありません。")
+            return
+        if self._playall_pause is not None:
+            self._play_jump(lines[0][0])
+        else:
+            self.play_all()
+
+    def _play_jump(self, lineno):
+        """lineno の行へ移る。連続再生中なら、止めてからそこから読み直す。
+        止めて読み直すので、少し間があく（読んだ行と先読みした行は合成キャッシュに
+        あるので、たいてい1秒もかからない）。"""
+        def go():
+            self.text.mark_set("insert", f"{lineno}.0")
+            self.text.see(f"{lineno}.0")
+            self.text.tag_remove("playing", "1.0", "end")
+            self.text.tag_add("playing", f"{lineno}.0", f"{lineno}.end")
+        go()
+        if self._playall_pause is not None:
+            self._after_stopping(lambda: (go(), self.play_from_cursor()))
+        else:
+            self._play_pos = {t[0]: i for i, t in
+                              enumerate(self._speakable_lines())}
+            self._set_position(lineno)
+
+    def _on_speed_scale(self, value):
+        """再生バーの速さを動かしたとき。0.1刻みにそろえて 4. の話速へ入れる。"""
+        v = round(float(value) * 10) / 10
+        try:
+            same = abs(self.speed_var.get() - v) < 1e-9
+        except tk.TclError:
+            same = False   # 話速の欄が空・入力途中
+        if not same:
+            self.speed_var.set(v)
+
+    def _on_speed_var(self, *_):
+        """話速が変わったら、再生バーのつまみと数字を合わせる。連続再生中なら、
+        動かし終わるのを少し待ってから、今の行の頭から新しい速さで読み直す。"""
+        try:
+            v = float(self.speed_var.get())
+        except (tk.TclError, ValueError):
+            return   # 入力途中の空欄など
+        self._speed_text.set(f"{v:.1f}")
+        if abs(float(self._speed_scale.get()) - v) > 1e-9:
+            self._speed_scale.set(v)   # つまみの command が呼ばれても同じ値なので何もしない
+        if self._playall_pause is None:
+            return
+        old = self._ticks.pop("speed_restart", None)
+        if old:
+            try:
+                self.after_cancel(old)
+            except tk.TclError:
+                pass
+        self._tick("speed_restart", 700, self._restart_at_speed)
+
+    def _restart_at_speed(self):
+        self._ticks.pop("speed_restart", None)
+        if self._playall_pause is not None and self._bookmark is not None:
+            self._play_jump(self._bookmark)
+
+    def _show_resume(self, line):
+        """「前回の続き：◯行目「…」から ⏵ 続きを聴く」を再生バーの上に出す。"""
+        snippet = self.text.get(f"{line}.0", f"{line}.end").strip()
+        if len(snippet) > 20:
+            snippet = snippet[:20] + "…"
+        self._resume_var.set(f"前回の続き：{line}行目「{snippet}」から")
+        self._resume_row.pack(fill="x", pady=(0, GAPY), before=self._player_ctl)
+
+    def _hide_resume(self):
+        self._resume_row.pack_forget()
 
     # ---------------- 主要操作のキーボードショートカット ----------------
     def _kb_invoke(self, btn):
@@ -1440,12 +1732,30 @@ class App(_Base):
         self._update_portrait()
         self._blink_after = self.after(3800, self._blink_tick)
 
+    def _feedback_url(self):
+        """「💬 感想を送る」で開く URL。フォームがあれば版・OSを入れた状態で開く。"""
+        if not FEEDBACK_FORM_URL:
+            return FEEDBACK_URL
+        if not FEEDBACK_FORM_ENV_ENTRY:
+            return FEEDBACK_FORM_URL
+        import platform
+        from urllib.parse import urlencode
+        if core.IS_MAC:
+            os_name = f"macOS {platform.mac_ver()[0]}".strip()
+        else:
+            os_name = f"{platform.system()} {platform.release()}".strip()
+        env = (f"v{core.APP_VERSION} / {os_name} / "
+               f"Python {platform.python_version()}")
+        return (FEEDBACK_FORM_URL + "?usp=pp_url&"
+                + urlencode({FEEDBACK_FORM_ENV_ENTRY: env}))
+
     def _open_feedback(self):
         import webbrowser
+        url = self._feedback_url()
         try:
-            webbrowser.open(FEEDBACK_URL)
+            webbrowser.open(url)
         except Exception:
-            self.status_var.set("ブラウザを開けませんでした：" + FEEDBACK_URL)
+            self.status_var.set("ブラウザを開けませんでした：" + url)
 
     def _portrait_key_for(self, label):
         """話者ラベル→立ち絵キー。そのキャラの立ち絵が置かれていればキー、無ければ None。
@@ -1609,10 +1919,13 @@ class App(_Base):
         if restore:
             self._update_portrait()  # 既定話者の base に戻す
 
-    # 立ち絵の自動開閉しきい値。表示/非表示で値を分ける（ヒステリシス）ことで、
-    # 境界付近でウィンドウをドラッグしたときの pack/pack_forget 連打・チラつきを防ぐ
-    _SIDE_SHOW_W = 1120
-    _SIDE_HIDE_W = 1060
+    # 立ち絵の自動開閉。メインに最小の窓と同じ幅（_MAIN_MIN_W）が残るときだけ出す。
+    # 以前は 1120/1060px の決め打ちで表示倍率を見ておらず、125%表示の既定の窓でも
+    # 立ち絵が出て、メインが861pxに潰れていた（「全ルール適用」が「全」になる等）。
+    # 表示/非表示で値を分ける（ヒステリシス）ことで、境界付近でウィンドウをドラッグ
+    # したときの pack/pack_forget 連打・チラつきを防ぐ
+    _MAIN_MIN_W = 860     # 論理px（_px で倍率補正）。窓の最小幅と同じ
+    _SIDE_HYST_W = 60
 
     def _on_configure(self, event=None):
         """<Configure>はリサイズ中に連発するため、after_idleで1回にまとめてから
@@ -1640,15 +1953,199 @@ class App(_Base):
             return
         try:
             w = self.winfo_width()
+            hide_w = (_px(self._MAIN_MIN_W) + self._side.winfo_reqwidth()
+                      + PAD_X)
         except tk.TclError:
             return
-        if w >= self._SIDE_SHOW_W and not self._side_shown:
+        show_w = hide_w + _px(self._SIDE_HYST_W)
+        if w >= show_w and not self._side_shown:
             self._side.pack(side="right", fill="y", padx=(0, PAD_X), pady=PAD_Y,
                             before=self._main)
             self._side_shown = True
-        elif w < self._SIDE_HIDE_W and self._side_shown:
+        elif w < hide_w and self._side_shown:
             self._side.pack_forget()
             self._side_shown = False
+
+    # ---------------- 幅に合わせた行の並び ----------------
+    def _wrapping_copy(self, var):
+        """折り返して見せる文の、表示用の写しを返す（元の var に追従する）。
+        空白を改行しない空白（U+00A0）に替える: Tk は空白でしか折り返さず、空白の
+        無い日本語の文を1語とみなすので、「✅ 抽出できたよ：…」が「✅」だけの行と
+        残りに割れていた。替えると行いっぱいに詰めて折り返す。"""
+        disp = tk.StringVar(self, value=var.get().replace(" ", "\u00a0"))
+        var.trace_add("write",
+                      lambda *_: disp.set(var.get().replace(" ", "\u00a0")))
+        return disp
+
+    def destroy(self):
+        """窓を閉じる。行の並び直しの予約は先に取り消す。macOS の Tk は、窓を壊す
+        途中でたまっていた after_idle を動かすことがあり、壊れかけの部品を測ったり
+        並べ替えたりして Tk ごと落ちていた（CI の macOS の GUI テストで再現）。"""
+        self._destroying = True
+        if self._reflow_after is not None:
+            try:
+                self.after_cancel(self._reflow_after)
+            except tk.TclError:
+                pass
+            self._reflow_after = None
+        # 別の行へ置いた部品（話速〜音量・本文の情報）は、壊す前に外す。macOS の
+        # Tk 8.6.12（Python 3.9 に付いてくるもの）は、親ではない枠に pack(in_=…) で
+        # 置いた部品が残ったまま窓を壊すと落ちる（CI の macOS で、外すと4回とも落ちず、
+        # 外さないと半分ほど落ちた）
+        for w in (getattr(self, "_voice_rows", (None,) * 3)[2],
+                  getattr(self, "_rbar", (None,) * 3)[2]):
+            if w is not None:
+                try:
+                    w.pack_forget()
+                except tk.TclError:
+                    pass
+        super().destroy()
+
+    def _schedule_reflow(self, event=None):
+        """窓の幅や文の長さが変わったら、行の並び（_reflow）を1回だけやり直す。
+        リサイズ中は <Configure> が連発するので、after_idle でまとめる。"""
+        if self._reflow_after is not None or self._destroying:
+            return   # 予約済み・閉じている最中
+        try:
+            self._reflow_after = self.after_idle(self._reflow)
+        except tk.TclError:
+            self._reflow_after = None
+
+    def _reflow(self):
+        """狭い窓で切れていた3か所の並びを、今の幅に合わせて自動で決める。
+        どれも「今の並び」に左右されない幅（部品の必要な幅と、行の実際の幅）で
+        決めるので、並びを変えたせいでまた並びが変わる、という行き来は起きない。
+        ここでは update_idletasks を呼ばない（macOS の Tk は、after_idle の中から
+        もう一度ためた処理を回すと落ちることがある）。測った幅が古くても、並べ終わって
+        本文欄の <Configure> が来たら、もう一度ここが動いて正しい並びになる。"""
+        self._reflow_after = None
+        if self._destroying:
+            return
+        try:
+            self._reflow_run_row()
+            self._reflow_voice_row()
+            self._reflow_result_bar()
+            self._reflow_height()
+        except (tk.TclError, AttributeError):
+            pass   # 構築途中（まだ無い行がある）・終了中は無視
+
+    def _reflow_run_row(self):
+        """2. の実行行: 状態文に使える幅が狭いときは進捗バーを短くして文に譲る。
+        状態文の欄は2行ぶんの高さに固定し、3行以上になる文は先頭から見せる。"""
+        run, box, lbl, prog = (self._run_frame, self._status_box,
+                               self._status_lbl, self.progress)
+        others = run.winfo_reqwidth() - prog.winfo_reqwidth() - box.winfo_reqwidth()
+        room = run.winfo_width() - others - _px(240)   # 進捗バーが長いときの文の幅
+        length = _px(240) if room >= _px(320) else _px(120)
+        # cget の値は winfo_pixels で数にする。Python 3.9 の tkinter は Tcl のまま
+        # 返すことがあり、int() に渡すと TypeError で並び直しが途中で止まっていた
+        if prog.winfo_pixels(prog.cget("length")) != length:
+            prog.configure(length=length)
+        font = str(lbl.cget("font")) or "TkDefaultFont"
+        line = int(self.tk.call("font", "metrics", font, "-linespace"))
+        height = max(2 * line + _px(4), self.extract_btn.winfo_reqheight())
+        if box.winfo_pixels(box.cget("height")) != height:
+            box.configure(height=height)
+        anchor = "nw" if lbl.winfo_reqheight() > height else "w"
+        if str(lbl.cget("anchor")) != anchor:
+            lbl.configure(anchor=anchor)
+
+    def _reflow_voice_row(self):
+        """4. の声・調整: 1行に入らないときは、話速〜音量を下の行へ送る
+        （見出し「声・調整」のぶん字下げして、話者の下にそろえる）。"""
+        va, va2, params, head = self._voice_rows
+        base = va.winfo_reqwidth() - (params.winfo_reqwidth()
+                                      if self._voice_one else 0)
+        one = va.winfo_width() >= base + params.winfo_reqwidth()
+        if one == self._voice_one:
+            return
+        self._voice_one = one
+        if one:
+            va2.pack_forget()
+            params.pack(in_=va, side="left", padx=0)
+        else:
+            va2.pack(fill="x", padx=GAPX, pady=(2, 0), after=va)
+            params.pack(in_=va2, side="left",
+                        padx=(head.winfo_reqwidth() + GAPX, 0))
+        params.lift()
+
+    # 本文欄がこれより低くなったら、2. の抽出オプションを畳む（論理px。約8行）
+    _TEXT_MIN_H = 160
+
+    def _reflow_height(self):
+        """窓が低くて本文欄が数行しか見えないときは、2. の抽出オプション（改行の扱い・
+        PDF処理・整形）を畳み、本文欄に高さを回す。以前は高さ768pxの画面のノートで
+        本文欄が2行ほどしか残らなかった。設定は最初に決めたら触ることが少ないので、
+        畳むのはここ。畳んだら抽出ボタンの隣の「⚙ オプション ▸」で開ける。
+        戻すかどうかは「戻したあとの本文欄の高さ」で決め、境目で開け閉めを繰り返さない
+        よう、戻すときだけ余裕を見る。"""
+        text_h = self.text.winfo_height()
+        if text_h <= 1:
+            return   # まだ並べ終わっていない
+        need = _px(self._TEXT_MIN_H)
+        if self._opt_hidden:
+            if text_h - self._opt_rows_height() >= need + _px(40):
+                self._set_opt_rows(True)   # 高くなったので戻す
+                self._opt_toggle.pack_forget()
+        elif text_h < need:
+            if not self._opt_forced:
+                self._set_opt_rows(False)
+                self._opt_toggle.config(text="⚙ オプション ▸")
+                if not self._opt_toggle.winfo_manager():
+                    self._opt_toggle.pack(side="left", padx=(GAPX, 0),
+                                          after=self.extract_btn)
+        elif self._opt_forced and text_h >= need + _px(40):
+            self._opt_forced = False   # 手で開かなくても入る高さになった
+            self._opt_toggle.pack_forget()
+
+    def _opt_rows_height(self):
+        """畳んだ抽出オプションを戻すと、本文欄から減る高さ。"""
+        basic, common = self._opt_rows
+        h = basic.winfo_reqheight() + common.winfo_reqheight() + GAPY + 4
+        if self._adv_open:
+            h += self._adv_frame.winfo_reqheight() + 2
+        return h
+
+    def _set_opt_rows(self, show):
+        """2. の抽出オプションの行を出す/畳む（詳細設定が開いていればそれも）。"""
+        basic, common = self._opt_rows
+        self._opt_hidden = not show
+        if show:
+            basic.pack(fill="x", padx=GAPX, pady=(GAPY, 2), before=self._run_frame)
+            common.pack(fill="x", padx=GAPX, pady=(2, 0), before=self._run_frame)
+            if self._adv_open:
+                self._adv_frame.pack(fill="x", padx=GAPX, pady=(2, 0),
+                                     before=self._run_frame)
+        else:
+            for f in (basic, common, self._adv_frame):
+                f.pack_forget()
+
+    def _toggle_opt_rows(self):
+        """低い窓で畳んだ抽出オプションを、手で開く/閉じる。"""
+        show = self._opt_hidden
+        self._opt_forced = show
+        self._set_opt_rows(show)
+        self._opt_toggle.config(text="⚙ オプション ▾" if show else "⚙ オプション ▸")
+
+    def _reflow_result_bar(self):
+        """3. の一括置換バー: 置換の道具と本文の情報が1行に入るなら1行に並べ、
+        入らないなら本文の情報を本文の下の行へ送る（入るのに2行にして、本文欄の
+        高さをむだに削らない）。"""
+        bar, rep, info, foot, body = self._rbar
+        one = bar.winfo_width() >= (rep.winfo_reqwidth() + info.winfo_reqwidth()
+                                    + 2 * GAPX)
+        if one == self._rbar_one:
+            return
+        self._rbar_one = one
+        if one:
+            foot.pack_forget()
+            info.pack(in_=bar, side="right", fill="none", expand=False,
+                      padx=(2 * GAPX, 0))
+        else:
+            foot.pack(side="bottom", fill="x", padx=GAPX, pady=(0, GAPY),
+                      before=body)
+            info.pack(in_=foot, side="top", fill="x", expand=True, padx=0)
+        info.lift()
 
     # ---------------- 合成パラメータ・行別話者ヘルパー ----------------
     def _format_choices(self):
@@ -1866,14 +2363,29 @@ class App(_Base):
               ("PDF", "*.pdf"), ("画像", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp *.gif"),
               ("テキスト・文書", "*.txt *.docx *.epub"),
               ("すべて", "*.*")]
+        added = 0
         for p in filedialog.askopenfilenames(title="ファイルを選択", filetypes=ft):
-            self._add_one(p)
+            added += self._add_one(p)
+        self._auto_extract(added)
 
     def add_folder(self):
         d = filedialog.askdirectory(title="フォルダを選択")
         if not d:
             return
-        self._add_path(d)
+        self._auto_extract(self._add_path(d))
+
+    def _auto_extract(self, added):
+        """ファイルを入れたら、すぐ文字を取り出す（「▶ テキスト抽出 実行」を押す
+        手間をなくす）。本文が空のときだけ。本文があるときに取り出すと、直した所ごと
+        入れ替わってしまうので、押してもらうよう案内するだけにする。"""
+        if not added or self.busy or self._previewing:
+            return
+        if self.text.get("1.0", "end").strip():
+            self.status_var.set(
+                f"{added}件追加したよ。本文があるので、取り出すときは"
+                "「▶ テキスト抽出 実行」を押してね（本文は入れ替わります）")
+            return
+        self.start_extract()
 
     def _add_path(self, p):
         """ファイルなら対応形式のとき追加、フォルダなら中の対応ファイルを追加。追加件数を返す。"""
@@ -1934,6 +2446,7 @@ class App(_Base):
         if skipped:
             msg += f" / 非対応 {skipped}件をスキップ"
         self.status_var.set(msg)
+        self._auto_extract(added)
 
     def remove_selected(self):
         sel = self.listbox.curselection()
@@ -2080,7 +2593,7 @@ class App(_Base):
             self.status_var.set("VOICEVOXを起動したよ。準備ができたら自動でつなぐね🍂")
             self._start_connect_retry()
         except FileNotFoundError as e:
-            self._ask_voicevox_path(str(e))
+            self._ask_voicevox_path(str(e), retry=self.launch_voicevox)
         except Exception as e:
             messagebox.showerror("VOICEVOX", f"起動に失敗: {e}")
 
@@ -2118,17 +2631,55 @@ class App(_Base):
                 f"エンジンを起動したよ（{url}）。準備ができたら自動でつなぐね🍂")
             self._start_connect_retry(60, interval=2000)
         except FileNotFoundError as e:
-            self._ask_voicevox_path(str(e))
+            self._ask_voicevox_path(str(e), retry=self.launch_engine_only)
         except Exception as e:
             messagebox.showerror("VOICEVOX", f"エンジンの起動に失敗: {e}")
 
-    def _ask_voicevox_path(self, message):
-        """VOICEVOXが見つからないとき、場所を手で教えてもらう。
-        標準以外の場所に入れている人が、ここで詰まって終わらないように。"""
-        if not messagebox.askyesno(
-                "VOICEVOXが見つかりません",
-                f"{message}\n\nVOICEVOXの場所を手動で選びますか？"):
-            return
+    def _ask_voicevox_path(self, message, retry=None):
+        """VOICEVOXが見つからないとき、入手先（公式サイト）か、場所を選ぶかを聞く。
+        以前は「場所を手動で選びますか？」だけで、まだ入れていない人はアプリから
+        入手先にたどり着けず、そこで行き止まりだった。場所を選んだら retry で
+        そのまま起動し直す。"""
+        win = tk.Toplevel(self)
+        win.title("VOICEVOXが見つかりません")
+        win.transient(self)
+        win.resizable(False, False)
+        self._place_dialog(win)
+        frm = ttk.Frame(win)
+        frm.pack(fill="both", expand=True, padx=_px(14), pady=_px(12))
+        ttk.Label(frm, wraplength=_px(440), justify="left", text=(
+            "VOICEVOXが見つかりませんでした。\n"
+            "VOICEVOX は、このアプリとは別の無料のソフトです。まだ入れていなければ、"
+            "公式サイトから入れてください。\n"
+            "入れてあるのに見つからないとき（zip を展開して置いた場合など）は、"
+            "場所を選んでください。")).pack(anchor="w")
+        ttk.Label(frm, text=message, style="Credit.TLabel", wraplength=_px(440),
+                  justify="left").pack(anchor="w", pady=(_px(6), 0))
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(_px(12), 0))
+
+        def open_site():
+            win.destroy()
+            import webbrowser
+            try:
+                webbrowser.open(VOICEVOX_SITE)
+                self.status_var.set("VOICEVOXの公式サイトを開いたよ。入れたら、"
+                                    "4. の「VOICEVOX起動」をもう一度押してね🍂")
+            except Exception:
+                self.status_var.set("ブラウザを開けませんでした：" + VOICEVOX_SITE)
+
+        def choose():
+            win.destroy()
+            self._choose_voicevox_path(retry)
+        ttk.Button(btns, text="閉じる", command=win.destroy).pack(side="right")
+        ttk.Button(btns, text="場所を選ぶ…", command=choose).pack(
+            side="right", padx=(0, _px(6)))
+        ttk.Button(btns, text="VOICEVOXを入手（公式サイト）", style="Primary.TButton",
+                   command=open_site).pack(side="right", padx=(0, _px(6)))
+        win.bind("<Escape>", lambda e: win.destroy())
+
+    def _choose_voicevox_path(self, retry=None):
+        """VOICEVOX本体の場所を選んでもらって覚える。覚えたら retry で起動し直す。"""
         if core.IS_MAC:
             # .app はフォルダ扱いなのでファイル選択では選べない
             path = filedialog.askdirectory(title="VOICEVOX.app を選んでください")
@@ -2146,6 +2697,8 @@ class App(_Base):
         self._voicevox_path = path
         core.find_voicevox(refresh=True)
         self.status_var.set(f"VOICEVOXの場所を覚えたよ: {path}")
+        if retry is not None:
+            retry()   # 押し直してもらわなくても、そのまま起動する
 
     def _engine_ready(self):
         """音声機能が使える状態か。話者リストの有無ではなく接続状態で判断する。
@@ -2343,12 +2896,18 @@ class App(_Base):
         # 行番号と一致し、「いいえ」のジャンプ先が先頭空行の分ずれない
         if not self._confirm_speaker_tags():
             return
-        # 行別話者を解決して (テキスト, style_id, 段落番号) のジョブ一覧を作る
+        self.text.tag_remove("errline", "1.0", "end")   # 前回止まった行の印を外す
+        # 行別話者を解決して (テキスト, style_id, 段落番号) のジョブ一覧を作る。
+        # linenos はジョブごとの本文欄の行番号（失敗した行へ移るため）。text は前後の
+        # 空白を落としてあるので、落とした先頭の行数ぶんずらす
+        raw = self.text.get("1.0", "end")
+        lead = raw[:len(raw) - len(raw.lstrip())].count("\n")
         default_id = default_sp[1]
         jobs = []
+        linenos = []
         para = 0
         memo_skipped = 0
-        for ln in text.split("\n"):
+        for k, ln in enumerate(text.split("\n")):
             if not ln.strip():
                 para += 1
                 continue
@@ -2359,6 +2918,7 @@ class App(_Base):
             if not spoken.strip():
                 continue  # タグのみの行
             jobs.append((spoken, sp[1] if sp else default_id, para))
+            linenos.append(lead + k + 1)
         if memo_skipped:
             self.status_var.set(f"＃メモ行 {memo_skipped}行は読み上げからスキップするよ")
         if not jobs:
@@ -2425,7 +2985,7 @@ class App(_Base):
                               state="normal")
         self.progress.config(mode="determinate", maximum=len(jobs), value=0)
         self._spawn(self._synth_worker,
-                    (jobs, groups, voice, target, unit, gap, fmt, srt))
+                    (jobs, groups, voice, target, unit, gap, fmt, srt, linenos))
 
     def cancel_synth(self):
         """実行中の音声生成を中断する（未完了のファイルは保存しない）。"""
@@ -2439,7 +2999,8 @@ class App(_Base):
         self._synth_cancel = None
         self.synth_btn.config(text="🔊 音声を生成", command=self.start_synth)
 
-    def _synth_worker(self, jobs, groups, voice, target, unit, gap, fmt, srt):
+    def _synth_worker(self, jobs, groups, voice, target, unit, gap, fmt, srt,
+                      linenos=None):
         cancel = self._synth_cancel
         # 行WAVはスプール（一時フォルダ）へ書き、メモリには (パス, 再生秒) だけ
         # 保持する。従来は全行のWAVバイト列をリストに持ち、10時間級の本で
@@ -2449,6 +3010,7 @@ class App(_Base):
         spool = None
         try:
             from concurrent.futures import ThreadPoolExecutor
+            import requests
             spool = tempfile.mkdtemp(prefix="t2v_spool_")
             # 生成中に自分の前半行のキャッシュを自分で追い出さないよう保護
             core.synth_cache_protect(time.time())
@@ -2473,8 +3035,13 @@ class App(_Base):
                             engine_ver=self._engine_ver,
                             dict_hash=dict_hash(), **voice)
                         break
-                    except Exception:
+                    except Exception as e:
                         if attempt == 2:
+                            # エンジンが断った・この行だけ時間切れ、ならこの行のせい。
+                            # つながらない（エンジンが落ちた）のは行のせいではない
+                            if (isinstance(e, (requests.HTTPError, requests.Timeout))
+                                    and not isinstance(e, requests.ConnectionError)):
+                                raise _LineSynthError(i) from e
                             raise
                         if cancel is not None and cancel.is_set():
                             return None
@@ -2661,6 +3228,15 @@ class App(_Base):
             else:
                 msg = f"{len(groups)}個の{fmt.upper()}を保存しました{note}:\n{target}"
             self.q.put(("synth_done", msg, target, credit))
+        except _LineSynthError as e:
+            cause = e.__cause__
+            tb = "".join(traceback.format_exception(type(cause), cause,
+                                                    cause.__traceback__))
+            if linenos:
+                self.q.put(("synth_line_error", tb, linenos[e.index],
+                            jobs[e.index][0]))
+            else:
+                self.q.put(("error", tb))
         except Exception:
             self.q.put(("error", traceback.format_exc()))
         finally:
@@ -3427,6 +4003,7 @@ class App(_Base):
         win = tk.Toplevel(self)
         win.title("読み方辞書（VOICEVOXユーザー辞書）")
         win.geometry("760x470")
+        self._place_dialog(win)
         self._dict_win = win
 
         ttk.Label(win, text="固有名詞などの読み間違いを登録できます。"
@@ -3923,15 +4500,7 @@ class App(_Base):
         if voice is None:
             return
         # (行番号, 読み上げテキスト, style_id) を集め、カーソル行以降を再生対象にする
-        default_id = default_sp[1]
-        all_lines = self.text.get("1.0", "end-1c").split("\n")
-        numbered = []
-        for i, ln in enumerate(all_lines, start=1):
-            if not ln.strip() or core.is_memo_line(ln):
-                continue   # 空行・メモ行（行頭#）は読まない
-            spoken, sp = self._resolve_line(ln.strip())
-            if spoken.strip():
-                numbered.append((i, spoken, sp[1] if sp else default_id))
+        numbered = self._speakable_lines(default_sp[1])
         if not numbered:
             self.status_var.set("再生するテキストがありません。")
             return
@@ -3946,12 +4515,15 @@ class App(_Base):
         self._playall_stop = threading.Event()
         self._playall_pause = threading.Event()
         self._previewing = True
+        self._play_pos = {t[0]: i for i, t in enumerate(numbered)}
+        self._hide_resume()
         self.preview_btn.config(state="disabled")
         self.playall_btn.config(state="disabled")
         self.resume_btn.config(state="disabled")
         self.sample_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
         self.pause_btn.config(text="⏸ 一時停止", state="normal")
+        self._sync_play_buttons()
         # 最初の1行の合成が終わるまで1秒前後かかる。その間なにも言わないと
         # 「押しても反応しない」に見えるので、押した瞬間に返事をする
         self.status_var.set(f"読み上げの準備中…（{len(targets)}行）")
@@ -3985,6 +4557,14 @@ class App(_Base):
             self.text.tag_add("bookmark", f"{line}.0", f"{line}.end")
         except tk.TclError:
             pass
+
+    def _reset_bookmark(self):
+        """しおりを捨てる。本文を入れ替えたとき用。しおりは行番号なので、別の本文に
+        残すと、次に開いたとき「前回の続き：312行目」が関係ない行を指していた。"""
+        self._bookmark = None
+        self._mark_bookmark()   # 淡色の印も外す
+        if not self._previewing:
+            self.resume_btn.config(state="disabled")
 
     def play_from_bookmark(self):
         """しおり（最後に再生した行）から連続再生を再開する。"""
@@ -4024,6 +4604,7 @@ class App(_Base):
         self._preview_stop = None
         self._playall_stop = None
         self._playall_pause = None
+        self._sync_play_buttons()
         self._stop_mouth()
         self.text.tag_remove("playing", "1.0", "end")
         self.pause_btn.config(text="⏸ 一時停止", state="disabled")
@@ -4206,6 +4787,9 @@ class App(_Base):
             return
         self._edit_body(lambda: self.text.delete("1.0", "end"))
         self._cleared_text = content
+        self._cleared_bookmark = self._bookmark   # 「復元」で一緒に戻す
+        self._reset_bookmark()
+        self._hide_resume()
         self.restore_btn.config(text="復元", command=self.restore_text)
         self._update_step_highlight()
         self._schedule_stats()
@@ -4227,6 +4811,10 @@ class App(_Base):
         self._edit_body(_do)
         self._cursor_to_top()
         self._cleared_text = None
+        if getattr(self, "_cleared_bookmark", None) is not None:
+            self._bookmark = self._cleared_bookmark   # 消す前のしおりも戻す
+            self._mark_bookmark()
+        self._cleared_bookmark = None
         self.restore_btn.config(text="本文を全消去", command=self.clear_text)
         self._update_step_highlight()
         self._schedule_stats()
@@ -4297,10 +4885,11 @@ class App(_Base):
         except Exception:
             pass
 
-    def _show_friendly_error(self, tb, where=""):
+    def _show_friendly_error(self, tb, where="", lead=""):
         """エラーを人間の言葉で伝える。原因のヒントと次の一手を提案し、
         技術的な詳細（traceback）は「詳細を表示」を押したときだけ見せる
-        （従来は生のtracebackがいきなり表示されて不親切だった）。"""
+        （従来は生のtracebackがいきなり表示されて不親切だった）。
+        lead は文頭に添える一言（どの行で止まったか、など）。"""
         self._log_error(tb, where)
         friendly = ("うまくいきませんでした…ごめんなさい！\n"
                     "もう一度試しても続くようなら「詳細を表示」の内容を添えて教えてね。")
@@ -4308,9 +4897,12 @@ class App(_Base):
             if re.search(pat, tb):
                 friendly = msg
                 break
+        if lead:
+            friendly = f"{lead}\n{friendly}"
         win = tk.Toplevel(self)
         win.title("エラー")
         win.transient(self)
+        self._place_dialog(win)
         frm = ttk.Frame(win)
         frm.pack(fill="both", expand=True, padx=12, pady=12)
         ttk.Label(frm, text="⚠️ " + friendly, wraplength=480,
@@ -4358,6 +4950,7 @@ class App(_Base):
         self._en_help_win = win
         win.title("英語の画像を読むには")
         win.transient(self)
+        self._place_dialog(win)
         frm = ttk.Frame(win)
         frm.pack(fill="both", expand=True, padx=12, pady=12)
         W = 520
@@ -4456,6 +5049,7 @@ class App(_Base):
         win.title("音声キャッシュ")
         win.transient(self)
         win.resizable(False, False)
+        self._place_dialog(win)
         frm = ttk.Frame(win)
         frm.pack(fill="both", expand=True, padx=12, pady=12)
         ttk.Label(frm, justify="left", text=(
@@ -4526,6 +5120,7 @@ class App(_Base):
         win.title("🎉 できあがり！")
         win.transient(self)
         win.resizable(False, False)
+        self._place_dialog(win)
         frm = ttk.Frame(win)
         frm.pack(fill="both", expand=True, padx=14, pady=12)
         ttk.Label(frm, text=info, wraplength=520,
@@ -4585,6 +5180,7 @@ class App(_Base):
         win.title("整形レポート")
         win.geometry("640x480")
         win.transient(self)
+        self._place_dialog(win)
         head = ttk.Frame(win)
         head.pack(fill="x", padx=8, pady=(8, 0))
         ttk.Label(head, text="自動整形の内容（選択してコピーできます）").pack(side="left")
@@ -4728,8 +5324,10 @@ class App(_Base):
         self._paint(pal)
         # 検索/再生/しおりのハイライトは明色固定なので、文字色を黒にして全テーマで読めるように
         for tag, bg in (("playing", "#cde8ff"), ("hit", "#fff3a3"),
-                        ("curhit", "#ffb347"), ("bookmark", "#e6d8f5")):
+                        ("curhit", "#ffb347"), ("bookmark", "#e6d8f5"),
+                        ("errline", "#ffd6d6")):
             self.text.tag_config(tag, background=bg, foreground="#000000")
+        self._schedule_reflow()   # テーマでボタンの余白が変わり、必要な幅も変わる
 
     def _paint(self, p):
         """パレット p を clam ベースで全ウィジェットへ一括適用する。"""
@@ -4789,11 +5387,20 @@ class App(_Base):
         # ルール操作のMenubutton（TButtonと同じ見た目に揃える）
         style.configure("TMenubutton", background=p["btn"], foreground=p["fg"],
                         bordercolor=p["border"], relief="flat",
-                        padding=btn_pad, arrowcolor=p["fg"])
+                        padding=btn_pad)
         style.map("TMenubutton",
                   background=[("pressed", p["btn_hi"]), ("active", p["btn_hi"]),
                               ("disabled", p["bg"])],
                   foreground=[("disabled", p["disabled"])])
+        # 「ルール ▾」は文字に ▾ を入れているので、ttk が右に描く矢印は外す。
+        # 二重になるうえ、Tk 9 ではその矢印が文字より大きな黒い ▼ になっていた。
+        # 「詳細設定 ▸」など、ほかの開閉ボタンも文字の矢印で揃えている
+        def _drop_indicator(layout):
+            return [(name, dict(opts, children=_drop_indicator(opts["children"]))
+                     if "children" in opts else opts)
+                    for name, opts in layout if not name.endswith(".indicator")]
+        style.layout("Plain.TMenubutton",
+                     _drop_indicator(style.layout("TMenubutton")))
         # 入力系
         for w in ("TEntry", "TSpinbox", "TCombobox"):
             style.configure(w, fieldbackground=p["field"], foreground=p["fg"],
@@ -4811,7 +5418,6 @@ class App(_Base):
         if UI_SCALE > 1.0:
             style.configure("TSpinbox", arrowsize=_px(12))
             style.configure("TCombobox", arrowsize=_px(12))
-            style.configure("TMenubutton", arrowsize=_px(12))
             style.configure("TScrollbar", arrowsize=_px(13), width=_px(13))
             for w in ("TCheckbutton", "TRadiobutton"):
                 style.configure(w, indicatorsize=_px(10))
@@ -4881,6 +5487,11 @@ class App(_Base):
         win.title("検索")
         win.geometry("360x40")
         win.transient(self)
+        # 検索は本文を隠さないよう、真ん中ではなく本文欄の右上に出す
+        self._place_dialog(win, near=lambda w, h: (
+            self.text.winfo_rootx() + self.text.winfo_width() - w - _px(24),
+            self.text.winfo_rooty() + _px(8)),
+            focus=lambda: self._search_entry)
         self._search_win = win
         row = ttk.Frame(win); row.pack(fill="x", padx=6, pady=6)
         self._search_var = tk.StringVar()
@@ -5001,8 +5612,18 @@ class App(_Base):
             self.text.insert("1.0", cached)
             self._cursor_to_top()   # 連続再生が最後の1行だけにならないように
             self._mark_bookmark()   # 前回のしおり位置を淡色でマーク
+            if self._bookmark is None:
+                self.status_var.set(f"{self._hello} 前回のテキストを復元したよ")
+                return
+            # しおりがあれば、その行にカーソルを置いて「前回の続き」を出す。
+            # ▶ 再生 でも ⏵ 続きを聴く でも、聴いていた所から続く
+            last = int(self.text.index("end-1c").split(".")[0])
+            line = min(self._bookmark, last)
+            self.text.mark_set("insert", f"{line}.0")
+            self.text.see(f"{line}.0")
+            self._show_resume(line)
             self.status_var.set(f"{self._hello} 前回のテキストを復元したよ"
-                                "（しおりの「⏵ 続きから」も使えます）")
+                                f"（{line}行目まで聴いていたよ）")
 
     # ---------------- 声プリセット ----------------
     def _preset_labels(self):
@@ -5265,7 +5886,100 @@ class App(_Base):
             sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
             x = max(0, min(x, max(0, sw - w)))
             y = max(0, min(y, max(0, sh - h)))
+        # 見えてはいても、下端がタスクバーの裏に入っていると「再生・生成」の行が
+        # 隠れる。窓がいちばん重なっている画面の作業領域に収める
+        w, h, x, y = self._fit_to_work_area(w, h, x, y)
+        min_w, min_h = self.minsize()
+        if h < min_h:
+            self.minsize(min_w, h)   # 最小サイズに押し戻されて、また隠れないように
         self.geometry(f"{w}x{h}+{x}+{y}")
+
+    def _fit_to_work_area(self, w, h, x=None, y=None):
+        """Windows で、geometry（中身の w, h と外枠の左上 x, y）を作業領域
+        （タスクバーを除いた所）に収めて返す。窓がいちばん重なっている画面の
+        作業領域を使う。x, y が None（初回起動）なら、メインの画面の真ん中に置く。
+        Windows 以外・取れないときは、受け取ったまま返す。"""
+        if not core.IS_WIN:
+            return w, h, x, y
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class _MonitorInfo(ctypes.Structure):
+                _fields_ = [("cbSize", wintypes.DWORD),
+                            ("rcMonitor", wintypes.RECT),
+                            ("rcWork", wintypes.RECT),
+                            ("dwFlags", wintypes.DWORD)]
+
+            user32 = ctypes.windll.user32
+            gsm = user32.GetSystemMetrics
+            # SM_CYCAPTION=4 / SM_CXSIZEFRAME=32 / SM_CYSIZEFRAME=33 /
+            # SM_CXPADDEDBORDER=92。DPI対応を宣言済みなので実際のピクセルで返る
+            # （125%表示の実測: 29 / 4 / 4 / 5 → 外枠は中身より横18・縦47大きい）
+            caption = gsm(4)
+            frame_x = gsm(32) + gsm(92)
+            frame_y = gsm(33) + gsm(92)
+            # HMONITOR はポインタ幅。restype を言わないと64bitで上が切れる
+            user32.MonitorFromRect.restype = wintypes.HMONITOR
+            user32.MonitorFromPoint.restype = wintypes.HMONITOR
+            if x is None or y is None:
+                # MONITOR_DEFAULTTOPRIMARY=1（(0,0) はメインの画面の左上）
+                mon = user32.MonitorFromPoint(wintypes.POINT(0, 0), 1)
+            else:
+                outer = wintypes.RECT(x, y, x + w + 2 * frame_x,
+                                      y + caption + h + 2 * frame_y)
+                # MONITOR_DEFAULTTONEAREST=2
+                mon = user32.MonitorFromRect(ctypes.byref(outer), 2)
+            info = _MonitorInfo()
+            info.cbSize = ctypes.sizeof(_MonitorInfo)
+            if not mon or not user32.GetMonitorInfoW(mon, ctypes.byref(info)):
+                return w, h, x, y
+            rc = info.rcWork
+            if x is None or y is None:
+                x = rc.left + (rc.right - rc.left - w - 2 * frame_x) // 2
+                y = rc.top + (rc.bottom - rc.top - h - caption - 2 * frame_y) // 2
+            return _fit_rect_in_work_area(
+                w, h, x, y, (rc.left, rc.top, rc.right, rc.bottom),
+                frame_x, frame_y, caption)
+        except Exception:
+            return w, h, x, y
+
+    def _place_dialog(self, win, near=None, focus=None):
+        """小さな窓（エラー・完了・キャッシュ等）を本体の真ん中に出す。near を渡すと、
+        near(幅, 高さ) が返す位置に出す。focus には、出したあと入力を受ける部品を返す
+        関数を渡す（隠している間の focus_set は Tk が覚えないため、出してから当てる）。以前は Tk 任せで、本体がどこにあっても画面の
+        左上 (9,38) に出ていた（本体を2台目の画面に置くと、エラーの窓が別の画面に出て
+        気づけない）。窓を作った直後に呼ぶ。中身ができるまで隠しておき、大きさが
+        決まってから置く（50ms 待つあいだに Tk が並べ終える。update_idletasks は
+        macOS の Tk で落ちることがあるので使わない）。"""
+        win.withdraw()
+
+        def place():
+            if self._destroying:
+                return
+            try:
+                if not win.winfo_exists():
+                    return
+                m = re.match(r"(\d+)x(\d+)", win.geometry())
+                w = int(m[1]) if m and int(m[1]) > 1 else win.winfo_reqwidth()
+                h = int(m[2]) if m and int(m[2]) > 1 else win.winfo_reqheight()
+                if near is None:
+                    x = self.winfo_rootx() + (self.winfo_width() - w) // 2
+                    y = self.winfo_rooty() + (self.winfo_height() - h) // 3
+                else:
+                    x, y = near(w, h)
+                _w, _h, x, y = self._fit_to_work_area(w, h, x, y)
+                win.geometry(f"+{x}+{y}")
+                win.deiconify()
+                # 入力を受ける部品（検索窓の入力欄など）へ入力を移す。移さないと、
+                # 検索を開いてすぐ打った字が本文に入ってしまう
+                if focus is not None:
+                    target = focus()
+                    if target is not None and target.winfo_exists():
+                        target.focus_set()
+            except tk.TclError:
+                pass   # 置く前に閉じられた
+        win.after(50, place)
 
     def _virtual_screen(self):
         """全モニタを合わせた範囲 (x, y, 幅, 高さ)。左や上のモニタは x, y が負になる。
@@ -5379,6 +6093,8 @@ class App(_Base):
             self._extract_restore_button()
             self.text.delete("1.0", "end")
             self.text.insert("1.0", cleaned)
+            self._hide_resume()     # 前回の続きは、入れ替わる前の本文の話
+            self._reset_bookmark()  # しおりも前の本文の行番号なので捨てる
             self._cursor_to_top()   # 抽出直後に連続再生しても頭から読まれるように
             # 本文が変わったので復元ポイントは _on_text_modified が自動で無効化する
             self.progress.config(value=self.progress["maximum"])
@@ -5395,7 +6111,8 @@ class App(_Base):
             except tk.TclError:
                 est = "?"
             self.status_var.set(f"✅ 抽出できたよ：{n}行・読み上げめやす{est}"
-                                f"（3.で直したら「🔊 音声を生成」へ🍂）{shaped}")
+                                f"（▶ 再生で聴けるよ。ファイルにするなら"
+                                f"「🔊 音声を生成」🍂）{shaped}")
             self._set_busy(False)
             if warnings:
                 self._warn_with_english(warnings)
@@ -5519,6 +6236,7 @@ class App(_Base):
                     self.text.insert("end", "\n" + cleaned)
                 else:
                     first = 1
+                    self._reset_bookmark()   # 空の本文に新しく入れた＝前のしおりは別の本文の話
                     self.text.insert("1.0", cleaned)
                 if from_screen:
                     self._screen_last_text = cleaned
@@ -5577,6 +6295,7 @@ class App(_Base):
             self.text.tag_add("playing", f"{lineno}.0", f"{lineno}.end")
             self.text.mark_set("insert", f"{lineno}.0")
             self.text.see(f"{lineno}.0")
+            self._set_position(lineno)
             self.status_var.set(f"連続再生中 {done+1}/{total}: {line[:30]}")
         elif kind == "playall_skip":
             _, lineno, gen = msg
@@ -5591,6 +6310,7 @@ class App(_Base):
             self._previewing = False
             self._playall_stop = None
             self._playall_pause = None
+            self._sync_play_buttons()
             self._stop_mouth()
             self.text.tag_remove("playing", "1.0", "end")
             self._mark_bookmark()   # 次に「⏵続きから」で再開する行を可視化
@@ -5695,6 +6415,24 @@ class App(_Base):
             self._set_busy(False)
             self.status_var.set("うまくいきませんでした…（内容を確認してね）")
             self._show_friendly_error(tb, "テキスト抽出／音声生成")
+        elif kind == "synth_line_error":
+            # 1行だけがエンジンに断られ続けて生成が止まった。その行を選択して見せ、
+            # 何行目の何という文かをエラーの頭に添える（どこを直せばいいか分かるように）
+            _, tb, lineno, line = msg
+            self._synth_restore_button()
+            self._set_busy(False)
+            # 選択だけだと、エラーの窓に入力が移っている間は色が付かず見えない。
+            # 色付きの印（errline）も付ける（次の音声生成で外す）
+            self.text.tag_remove("sel", "1.0", "end")
+            self.text.tag_add("sel", f"{lineno}.0", f"{lineno}.end")
+            self.text.tag_add("errline", f"{lineno}.0", f"{lineno}.end")
+            self.text.mark_set("insert", f"{lineno}.0")
+            self.text.see(f"{lineno}.0")
+            snippet = line if len(line) <= 30 else line[:30] + "…"
+            self.status_var.set(f"{lineno}行目で止まりました（その行を選んであるよ）")
+            self._show_friendly_error(
+                tb, f"音声生成（{lineno}行目）",
+                lead=f"{lineno}行目「{snippet}」で止まりました。")
 
     def _tick(self, name, ms, func):
         """定期ループの予約を名前つきで持っておく（終了時にまとめて止めるため）。"""

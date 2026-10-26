@@ -62,7 +62,7 @@ Python が無ければ入れるかを聞き（パスワード不要）、アプ�
 - **Mac の人は、zip ではなく、上の「Mac の人」のターミナルの1行を使ってください**（警告が出ません）。
   zip が欲しい人は → [Mac 用 zip](https://github.com/rakuyou211-blip/TextToVoicevox/releases/latest/download/TextToVoicevox_Mac.zip)（`TextToVoicevox_Mac.zip`）。ただし、ブラウザで落とした zip の中身を**ダブルクリックすると、Mac が必ず「開いていません」と止めます**（Apple の有料の審査を受けていないアプリには、どれも出ます）。zip で入れるときは、下の「zip で入れる」の Mac の手順どおり、ダブルクリックではなくターミナルから始めてください。そうすれば出ません
 
-どちらも最新版（いまは **v1.24.2**・数百KB）です。自分の OS の方だけ落とせば大丈夫です（v1.22.0 から分けました。ほかの版は [Releases](https://github.com/rakuyou211-blip/TextToVoicevox/releases) から）。
+どちらも最新版（いまは **v1.25.0**・数百KB）です。自分の OS の方だけ落とせば大丈夫です（v1.22.0 から分けました。ほかの版は [Releases](https://github.com/rakuyou211-blip/TextToVoicevox/releases) から）。
 中身は Python のスクリプト一式です。EXE（ダブルクリックですぐ動く形）はまだありません。下の手順のとおり、Python を入れてから使ってください。
 Windows の zip でダブルクリックするのは **`起動.pyw` の1つだけ**です。v1.23 までは `起動.bat` も並んでいて、拡張子を隠す Windows ではどちらも「起動」に見え、`.bat` の方を開くと止められていました。いまは `.bat` を無くしたので、迷う所がありません（下の「はじめての人へ」参照）。
 
@@ -280,6 +280,8 @@ GUIを使わず、一括で変換できます。`起動.pyw` / `起動.command` 
 
 ひとりで作っている生まれたての道具です。動かない・読み間違える・ここが分かりにくい、などあれば [Issues](https://github.com/rakuyou211-blip/TextToVoicevox/issues) で教えてください。全部は直せないかもしれませんが、ちゃんと読みます。
 
-不具合じゃなくても、**使ってみた一言**がいちばん嬉しいです。「通学中に参考書を聞いてる」「ここで手が止まった」くらいで十分です。アプリの「▶ テキスト抽出 実行」の行の右端にある「💬 感想を送る」か、[感想フォーム](https://github.com/rakuyou211-blip/TextToVoicevox/issues/new?template=feedback.yml)からどうぞ。GitHub のアカウントが無ければ、X の [@rakuyou211](https://x.com/rakuyou211) へのリプライや DM でも。
+不具合じゃなくても、**使ってみた一言**がいちばん嬉しいです。「通学中に参考書を聞いてる」「ここで手が止まった」くらいで十分です。アプリの「▶ テキスト抽出 実行」の行の右端にある「💬 感想を送る」か、[感想フォーム](https://docs.google.com/forms/d/e/1FAIpQLSfHMtYozt4m_yHkdi569i-FALb_4JuwhMPS6qH4I8zU1nqy2A/viewform)からどうぞ。**アカウントは要りません**（Googleフォームです。名前もメールアドレスも集めません）。アプリから開くと、アプリの版と OS が欄に入った状態で開きます。送る前に見えるので、消してもかまいません。
+
+不具合を詳しく書きたいときは [Issues](https://github.com/rakuyou211-blip/TextToVoicevox/issues) へ。X の [@rakuyou211](https://x.com/rakuyou211) へのリプライや DM でも受け付けています。
 
 作者: rakuyou211（[https://github.com/rakuyou211-blip/TextToVoicevox](https://github.com/rakuyou211-blip/TextToVoicevox)） 🍂
