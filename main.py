@@ -1988,6 +1988,17 @@ class App(_Base):
             except tk.TclError:
                 pass
             self._reflow_after = None
+        # 別の行へ置いた部品（話速〜音量・本文の情報）は、壊す前に外す。macOS の
+        # Tk 8.6.12（Python 3.9 に付いてくるもの）は、親ではない枠に pack(in_=…) で
+        # 置いた部品が残ったまま窓を壊すと落ちる（CI の macOS で、外すと4回とも落ちず、
+        # 外さないと半分ほど落ちた）
+        for w in (getattr(self, "_voice_rows", (None,) * 3)[2],
+                  getattr(self, "_rbar", (None,) * 3)[2]):
+            if w is not None:
+                try:
+                    w.pack_forget()
+                except tk.TclError:
+                    pass
         super().destroy()
 
     def _schedule_reflow(self, event=None):
@@ -2026,12 +2037,14 @@ class App(_Base):
         others = run.winfo_reqwidth() - prog.winfo_reqwidth() - box.winfo_reqwidth()
         room = run.winfo_width() - others - _px(240)   # 進捗バーが長いときの文の幅
         length = _px(240) if room >= _px(320) else _px(120)
-        if int(prog.cget("length")) != length:
+        # cget の値は winfo_pixels で数にする。Python 3.9 の tkinter は Tcl のまま
+        # 返すことがあり、int() に渡すと TypeError で並び直しが途中で止まっていた
+        if prog.winfo_pixels(prog.cget("length")) != length:
             prog.configure(length=length)
         font = str(lbl.cget("font")) or "TkDefaultFont"
         line = int(self.tk.call("font", "metrics", font, "-linespace"))
         height = max(2 * line + _px(4), self.extract_btn.winfo_reqheight())
-        if int(box.cget("height")) != height:
+        if box.winfo_pixels(box.cget("height")) != height:
             box.configure(height=height)
         anchor = "nw" if lbl.winfo_reqheight() > height else "w"
         if str(lbl.cget("anchor")) != anchor:
