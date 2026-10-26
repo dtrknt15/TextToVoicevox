@@ -24,7 +24,7 @@ from urllib.parse import unquote
 
 # アプリのバージョン（タイトルバー・CLI --version・不具合報告の目印に使う）。
 # リリースごとにここだけ更新する。
-APP_VERSION = "1.24.2"
+APP_VERSION = "1.25.0"
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 OCR_PS1 = os.path.join(APP_DIR, "ocr_win.ps1")
@@ -2400,6 +2400,61 @@ def _fixed_drives():
         return []
 
 
+def _user_folders():
+    """デスクトップ・ダウンロード・ドキュメントの実際の場所（Windows）。
+    OneDrive に移したデスクトップ（OneDrive\\デスクトップ）もここで分かる。
+    取れないときは、ホームの下の決まった名前で代わりにする。"""
+    import ctypes
+    from ctypes import wintypes
+
+    class _GUID(ctypes.Structure):
+        _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
+                    ("Data3", wintypes.WORD), ("Data4", ctypes.c_ubyte * 8)]
+
+    def known(guid):
+        import uuid
+        b = uuid.UUID(guid).bytes_le
+        g = _GUID.from_buffer_copy(b)
+        p = ctypes.c_wchar_p()
+        try:
+            if ctypes.windll.shell32.SHGetKnownFolderPath(
+                    ctypes.byref(g), 0, None, ctypes.byref(p)) != 0:
+                return None
+            return p.value
+        finally:
+            ctypes.windll.ole32.CoTaskMemFree(p)
+
+    home = os.path.expanduser("~")
+    out = []
+    for guid, name in (("B4BFCC3A-DB2C-424C-B029-7FE99A87C641", "Desktop"),
+                       ("374DE290-123F-4565-9164-39C4925E467B", "Downloads"),
+                       ("FDD39AD0-238F-46AF-ADB4-6C85480369C7", "Documents")):
+        try:
+            p = known(guid)
+        except Exception:
+            p = None
+        for d in (p, os.path.join(home, name)):
+            if d and os.path.isdir(d) and d not in out:
+                out.append(d)
+    return out
+
+
+def _find_unzipped_voicevox():
+    """zip を展開しただけの VOICEVOX を、デスクトップ・ダウンロード・ドキュメントから
+    探す（Windows）。インストーラを使わない人はここに置くことが多いのに、以前は
+    探していなかった。見るのは「その下の VOICEVOX.exe」と「名前に voicevox を含む
+    フォルダの1段下まで」だけにして、大きなフォルダでも待たせない。"""
+    import glob
+    for d in _user_folders():
+        for pattern in (os.path.join(d, "VOICEVOX", "VOICEVOX.exe"),
+                        os.path.join(d, "*voicevox*", "VOICEVOX.exe"),
+                        os.path.join(d, "*voicevox*", "*", "VOICEVOX.exe")):
+            for p in sorted(glob.glob(pattern)):
+                if os.path.isfile(p):
+                    return p
+    return None
+
+
 def find_voicevox(user_path=None, refresh=False):
     """VOICEVOX本体のインストール先を探して返す。見つからなければ None。
     user_path: 設定で手動指定された場所（あれば最優先）。
@@ -2422,6 +2477,11 @@ def find_voicevox(user_path=None, refresh=False):
                 break
         if not found:
             found = _win_registry_voicevox()
+        if not found:
+            try:
+                found = _find_unzipped_voicevox()
+            except Exception:
+                found = None
         if not found:
             # 最後の手段。固定ディスクの分かりやすい場所だけを見る
             for d in _fixed_drives():

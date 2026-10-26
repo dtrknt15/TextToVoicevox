@@ -77,4 +77,4 @@
 
 ---
 
-一個人慢慢做的軟體 🍂。不管是「我這樣用」還是「卡在這裡」，一句話的感想都很歡迎：[感想表單](https://github.com/rakuyou211-blip/TextToVoicevox/issues/new?template=feedback.yml)（中文、英文、日文都可以）。
+一個人慢慢做的軟體 🍂。不管是「我這樣用」還是「卡在這裡」，一句話的感想都很歡迎：[感想表單](https://docs.google.com/forms/d/e/1FAIpQLSfHMtYozt4m_yHkdi569i-FALb_4JuwhMPS6qH4I8zU1nqy2A/viewform)（不需要帳號，也不會收集姓名或電子郵件；中文、英文、日文都可以）。想詳細回報問題的話，請到 [Issues](https://github.com/rakuyou211-blip/TextToVoicevox/issues)。
